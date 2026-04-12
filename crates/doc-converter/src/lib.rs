@@ -433,10 +433,17 @@ impl Converter {
             }
 
             // ── Pseudo-table detection: single-column code/directory-tree content ──
-            if Self::is_pseudo_table(table_xml) {
-                out.push_str("\n```\n");
+            if let Some((code_lang, skip_first)) = Self::detect_code_language(table_xml) {
+                out.push_str(&format!("\n```{}\n", code_lang));
+                let mut first = true;
                 for rcap in row_re.captures_iter(table_xml) {
                     let row_xml = rcap.get(1).map(|m| m.as_str()).unwrap_or("");
+                    // Skip the first row if it's just a language label (e.g. "Bash")
+                    if first && skip_first {
+                        first = false;
+                        continue;
+                    }
+                    first = false;
                     for ccap in cell_re.captures_iter(row_xml) {
                         if let Some(cell_xml) = ccap.get(1).map(|m| m.as_str()) {
                             let texts: String = cell_text_re.captures_iter(cell_xml)
@@ -548,7 +555,11 @@ impl Converter {
                 .map_err(|e| Error::Parse(format!("read xml: {}", e)))?;
         }
 
-        // Paragraphs (including table cells)
+        // Remove tables from XML so paragraph regex doesn't pick up table-cell paragraphs.
+        // Tables are processed separately in the "Tables" section below.
+        let table_re = Regex::new(r"(?s)<w:tbl>.*?</w:tbl>").unwrap();
+        let xml_no_tables = table_re.replace_all(&xml, "").to_string();
+
         let para_re = Regex::new(r"(?s)<w:p[ >].*?</w:p>").unwrap();
         let text_re  = Regex::new(r"<w:t[^>]*>([^<]*)</w:t>").unwrap();
 
@@ -567,10 +578,54 @@ impl Converter {
         let mut out = String::new();
         let _drawing_order = drawing_order; // consumed by drawing_map in caller
 
-        for para_match in para_re.find_iter(&xml) {
-            let para_xml = para_match.as_str();
+        // ── Collect all top-level elements (paragraphs and tables) by position ──
+        // Tables are matched in original xml; paragraphs are matched in xml_no_tables
+        // (which has tables removed), so all matched paragraphs are body-level.
 
-            // ── Extract text ───────────────────────────────────────────────────
+        let table_re  = Regex::new(r"(?s)<w:tbl>.*?</w:tbl>").unwrap();
+        let row_re    = Regex::new(r"(?s)<w:tr[ >].*?</w:tr>").unwrap();
+        let cell_re   = Regex::new(r"(?s)<w:tc[ >].*?</w:tc>").unwrap();
+        let cell_txt  = Regex::new(r"<w:t[^>]*>([^<]*)</w:t>").unwrap();
+
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum ElementKind { Para, Table }
+
+        #[derive(Debug)]
+        struct Element {
+            kind: ElementKind,
+            start: usize,
+            content: String,
+        }
+
+        let mut elements: Vec<Element> = Vec::new();
+
+        // Collect body paragraphs (from xml_no_tables, so they're definitely not in tables)
+        for para_match in para_re.find_iter(&xml_no_tables) {
+            elements.push(Element {
+                kind: ElementKind::Para,
+                start: para_match.start(),
+                content: para_match.as_str().to_string(),
+            });
+        }
+
+        // Collect tables
+        for tbl_match in table_re.find_iter(&xml) {
+            elements.push(Element {
+                kind: ElementKind::Table,
+                start: tbl_match.start(),
+                content: tbl_match.as_str().to_string(),
+            });
+        }
+
+        // Sort by original document position
+        elements.sort_by_key(|e| e.start);
+
+        // ── Process elements in order ────────────────────────────────────────────
+
+        for elem in elements {
+            match elem.kind {
+                ElementKind::Para => {
+                    let para_xml = &elem.content;
             let text_parts: Vec<String> = text_re.captures_iter(para_xml)
                 .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
                 .filter(|s| !s.is_empty())
@@ -633,27 +688,49 @@ impl Converter {
             }
         }
 
-        // ── Tables ────────────────────────────────────────────────────────────
-        let table_re  = Regex::new(r"(?s)<w:tbl>.*?</w:tbl>").unwrap();
-        let row_re    = Regex::new(r"(?s)<w:tr[ >].*?</w:tr>").unwrap();
-        let cell_re   = Regex::new(r"(?s)<w:tc[ >].*?</w:tc>").unwrap();
-        let cell_txt  = Regex::new(r"<w:t[^>]*>([^<]*)</w:t>").unwrap();
-
-        for tcap in table_re.find_iter(&xml) {
-            let table_xml = tcap.as_str();
+                ElementKind::Table => {
+                    let table_xml = &elem.content;
 
             // ── Pseudo-table detection: single-column code/directory-tree content ──
-            if Self::is_pseudo_table(table_xml) {
-                out.push_str("```\n");
+            if let Some((code_lang, skip_first)) = Self::detect_code_language(table_xml) {
+                out.push_str(&format!("```{}\n", code_lang));
+                let mut first = true;
                 for rcap in row_re.find_iter(table_xml) {
                     let row_xml = rcap.as_str();
+                    // Skip the first row if it's just a language label (e.g. pure "Bash" table)
+                    if first && skip_first {
+                        first = false;
+                        continue;
+                    }
+                    let is_first_row = first;
+                    first = false;
+
                     for ccap in cell_re.find_iter(row_xml) {
                         let cell_xml = ccap.as_str();
-                        let texts: String = cell_txt.captures_iter(cell_xml)
+                        let texts: Vec<&str> = cell_txt.captures_iter(cell_xml)
                             .filter_map(|tc| tc.get(1).map(|m| m.as_str().trim()))
                             .collect();
-                        if !texts.trim().is_empty() {
-                            out.push_str(texts.trim());
+                        let combined = texts.join(" ");
+                        if combined.trim().is_empty() { continue; }
+
+                        // If first non-skipped row starts with the language label, strip it
+                        // (e.g. "Bash keytool..." → "keytool...")
+                        let final_text = if is_first_row && !code_lang.is_empty() {
+                            let lower = combined.to_ascii_lowercase();
+                            let label = code_lang.to_lowercase();
+                            if lower.starts_with(&label) {
+                                let after = combined[label.len()..].trim_start();
+                                if after.is_empty() { continue; }
+                                after.to_string()
+                            } else {
+                                combined
+                            }
+                        } else {
+                            combined
+                        };
+
+                        if !final_text.trim().is_empty() {
+                            out.push_str(final_text.trim());
                             out.push('\n');
                         }
                     }
@@ -692,7 +769,9 @@ impl Converter {
                 }
             }
             out.push('\n');
-        }
+                } // end Table branch
+            } // end match elem.kind
+        } // end for elem in elements
 
         Ok(out.trim().to_string())
     }
@@ -775,65 +854,187 @@ impl Converter {
     /// Single-column tables containing lines that look like code/paths/directory trees
     /// (e.g. `@image:xxx`, `src/components/`, `├── foo`) are common in Word documents
     /// but should NOT be rendered as Markdown tables — they should be code blocks.
-    fn is_pseudo_table(table_xml: &str) -> bool {
+    ///
+    /// Returns `Some((language, skip_first_row))` if it's a pseudo-table (code block).
+    /// - `language`: the markdown code fence language (empty string for plain code block)
+    /// - `skip_first_row`: true when the first row is just a label (e.g. "Bash", "JSON")
+    ///   and should not appear as code content
+    /// Returns `None` if it's a real table that should be rendered as Markdown table.
+    fn detect_code_language(table_xml: &str) -> Option<(String, bool)> {
         let cell_re = Regex::new(r"(?s)<w:tc[ >].*?</w:tc>").unwrap();
         let cell_txt = Regex::new(r"<w:t[^>]*>([^<]*)</w:t>").unwrap();
 
-        let mut col_count: Option<usize> = None;
-        let mut line_count = 0;
-
-        // Find first row to determine column count
+        // Collect all row texts
         let row_re = Regex::new(r"(?s)<w:tr[ >].*?</w:tr>").unwrap();
-        for rcap in row_re.find_iter(table_xml) {
-            let row_xml = rcap.as_str();
-            let cells_in_row: Vec<_> = cell_re.find_iter(row_xml).collect();
+        let rows: Vec<String> = row_re.find_iter(table_xml)
+            .map(|rcap| {
+                let row_xml = rcap.as_str();
+                let mut all_texts = Vec::new();
+                for ccap in cell_re.find_iter(row_xml) {
+                    let cell_xml = ccap.as_str();
+                    let texts: Vec<&str> = cell_txt.captures_iter(cell_xml)
+                        .filter_map(|tc| tc.get(1).map(|m| m.as_str().trim()))
+                        .collect();
+                    let combined = texts.join(" ");
+                    if !combined.trim().is_empty() {
+                        all_texts.push(combined.trim().to_string());
+                    }
+                }
+                all_texts.join(" ")
+            })
+            .collect();
 
-            if line_count == 0 {
-                col_count = Some(cells_in_row.len());
-            }
-            line_count += 1;
+        // Must have at least 1 row
+        if rows.is_empty() {
+            return None;
         }
 
-        // Must be single-column and have at least 2 rows
-        let cols = match col_count {
-            Some(c) if c == 1 && line_count >= 2 => c,
-            _ => return false,
-        };
-
-        let _ = cols; // suppress unused warning
-
-        // Check if all cells look like code/directory-tree content
-        let pseudo_patterns = [
-            // Contains @ prefix (e.g. @image:xxx, @path:yyy)
-            |s: &str| s.starts_with('@'),
-            // Contains path separators (file paths, directory trees)
-            |s: &str| s.contains(":/") || s.contains('\\') || s.starts_with('/'),
-            // Directory tree characters (├──, └──, │)
-            |s: &str| s.contains("├──") || s.contains("└──") || s.contains("│"),
-            // Code-like patterns (starts with indent, has ::, #, $)
-            |s: &str| s.starts_with(' ') && s.contains(|c: char| c == ':' || c == '#' || c == '$'),
+        // Language label patterns → markdown language
+        let lang_labels: Vec<(&str, &str)> = vec![
+            ("plain text", "text"),
+            ("code block", "text"),
+            ("json", "json"),
+            ("xml", "xml"),
+            ("yaml", "yaml"),
+            ("toml", "toml"),
+            ("html", "html"),
+            ("css", "css"),
+            ("javascript", "javascript"),
+            ("typescript", "typescript"),
+            ("python", "python"),
+            ("rust", "rust"),
+            ("sql", "sql"),
+            ("bash", "bash"),
+            ("shell", "bash"),
+            ("cmd", "cmd"),
+            ("powershell", "powershell"),
+            ("go", "go"),
+            ("java", "java"),
+            ("c++", "cpp"),
+            ("c#", "csharp"),
+            ("php", "php"),
+            ("ruby", "ruby"),
+            ("swift", "swift"),
+            ("kotlin", "kotlin"),
+            ("markdown", "markdown"),
+            ("log", "log"),
+            ("output", ""),
+            ("result", ""),
+            ("error", ""),
+            ("warning", ""),
+            ("info", ""),
         ];
 
-        for rcap in row_re.find_iter(table_xml) {
-            let row_xml = rcap.as_str();
-            for ccap in cell_re.find_iter(row_xml) {
-                let cell_xml = ccap.as_str();
-                let texts: String = cell_txt.captures_iter(cell_xml)
-                    .filter_map(|tc| tc.get(1).map(|m| m.as_str()))
-                    .collect();
+        // Check if a line is a pure language label (e.g. "Bash", "JSON")
+        let is_lang_label = |line: &str| -> Option<String> {
+            let lower = line.to_ascii_lowercase();
+            for (label, lang) in &lang_labels {
+                if lower == *label {
+                    return Some(lang.to_string());
+                }
+            }
+            None
+        };
 
-                let trimmed = texts.trim();
-                if trimmed.is_empty() { continue; }
+        // Check if a line contains code command patterns
+        let is_code_like = |line: &str| -> bool {
+            if line.is_empty() { return false; }
+            let lower = line.to_ascii_lowercase();
 
-                // Check against pseudo-table patterns
-                let is_pseudo = pseudo_patterns.iter().any(|p| p(trimmed));
-                if !is_pseudo {
-                    return false;
+            // Pattern 1: @ prefix
+            if line.starts_with('@') { return true; }
+            // Pattern 2: path separators
+            if lower.contains(":/") || line.contains('\\') || line.starts_with('/') { return true; }
+            // Pattern 3: directory tree characters
+            if lower.contains("├──") || lower.contains("└──") || lower.contains("│") { return true; }
+            // Pattern 4: indented code with special chars
+            if line.starts_with(' ') && line.contains(|c: char| c == ':' || c == '#' || c == '$') { return true; }
+            // Pattern 5: starts with common CLI commands or keywords
+            let cli_commands = [
+                "sudo ", "npm ", "cargo ", "git ", "docker ", "kubectl ", "helm ",
+                "curl ", "wget ", "openssl ", "keytool ", "javac ", "gradle ",
+                "mvn ", "make ", "cmake ", "pip ", "pip3 ", "python ", "python3 ",
+                "node ", "ruby ", "perl ", "go ", "rustc ", "gcc ", "clang ",
+                "ls ", "cd ", "pwd ", "mkdir ", "rm ", "cp ", "mv ", "cat ",
+                "grep ", "sed ", "awk ", "find ", "xargs ", "chmod ", "chown ",
+                "tar ", "zip ", "unzip ", "ssh ", "scp ", "rsync ", "ping ",
+                "netstat ", "ss ", "iptables ", "systemctl ", "journalctl ",
+                "ps ", "top ", "htop ", "kill ", "killall ", "pkill ",
+                "env ", "export ", "source ", "alias ", "echo ", "printf ",
+                "if [", "for ", "while ", "case ", "function ", "=> {",
+                "import ", "from ", "require(", "module.exports",
+                "const ", "let ", "var ", "fn ", "def ", "func ",
+                "public ", "private ", "static ", "class ", "struct ",
+                "<!-- ", "-->", "/* ", "*/", "// ", "#!", "###",
+                "$ ", "&& ", "|| ", "| ", ">> ", "<< ", "2>", "1>",
+                "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE ",
+                "DROP ", "ALTER ", "TABLE ", "INDEX ", "WHERE ",
+            ];
+            for cmd in &cli_commands {
+                if lower.starts_with(cmd) { return true; }
+            }
+            // Pattern 6: contains command+space+flag (e.g. "keytool -genkey")
+            if line.contains(|c: char| c.is_whitespace()) {
+                // Split and check for command patterns
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let first = parts[0].to_lowercase();
+                    let second = parts[1];
+                    // command followed by flag (starts with -)
+                    if second.starts_with('-') { return true; }
+                    // Common tool names followed by subcommands
+                    let tools_with_subcmd = ["npm", "git", "docker", "cargo", "kubectl", "helm",
+                        "openssl", "keytool", "curl", "wget", "ssh", "scp", "psql", "mongosh",
+                        "make", "cmake", "mvn", "gradle", "javac", "ruby", "python", "node",
+                        "go", "rustc", "gcc", "clang", "pip", "pip3", "bun", "pnpm", "yarn"];
+                    if tools_with_subcmd.contains(&first.as_str()) { return true; }
+                    // Pattern 6b: first word is a language label (e.g. "Bash sudo keytool")
+                    if is_lang_label(&first).is_some() { return true; }
+                }
+            }
+            // Pattern 7: is a pure language label
+            if is_lang_label(line).is_some() { return true; }
+            false
+        };
+
+        // For multi-row tables: first row is label, rest are code
+        if rows.len() >= 2 {
+            let first_lang = is_lang_label(&rows[0]);
+            if first_lang.is_some() {
+                let rest_all_code = rows[1..].iter().all(|r| is_code_like(r) || r.is_empty());
+                if rest_all_code {
+                    return Some((first_lang.unwrap_or_default(), true));
                 }
             }
         }
 
-        true
+        // For ALL tables (single or multi-row): check if content looks like code
+        let all_code = rows.iter().all(|r| is_code_like(r) || r.is_empty());
+        if all_code {
+            // Try to detect language from content
+            let combined = rows.join(" ");
+            let lower = combined.to_ascii_lowercase();
+            for (label, lang) in &lang_labels {
+                if lower.starts_with(label) {
+                    // Row(s) start with a language label
+                    // - multi-row: first row is pure label → skip_first=true
+                    // - single-row with label+code: strip label from content → skip_first=false (strip_in_render=true implied)
+                    let after_label = lower[label.len()..].trim_start();
+                    let is_pure_label_row = rows.len() == 1 && after_label.is_empty();
+                    // skip_first=true: skip entire first row; strip_in_render=false
+                    // skip_first=false + first_row_has_label=true: output content stripped of label
+                    let skip_first = rows.len() > 1 || is_pure_label_row;
+                    return Some((lang.to_string(), skip_first));
+                }
+                if lower.contains(&format!(" {} ", label)) {
+                    return Some((lang.to_string(), false));
+                }
+            }
+            // No specific language → plain code block
+            return Some((String::new(), false));
+        }
+
+        None
     }
 
     fn escape_md(text: &str) -> String {
