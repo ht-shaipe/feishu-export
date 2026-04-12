@@ -40,18 +40,19 @@ impl FeishuClient {
             .post("/open-apis/drive/v1/export_tasks", access_token, body)
             .await?;
 
+        // 读取 body 并克隆一份用于日志+解析（不消费原始 response）
         let raw_text = response.text().await?;
         eprintln!("[API] Response: {}", raw_text.chars().take(200).collect::<String>());
 
         let data: CreateExportTaskResponse = serde_json::from_str(&raw_text).map_err(|e| {
             eprintln!("[API] JSON parse error: {}", e);
-            FeishuError::ApiError { code: -1, msg: format!("JSON parse error: {} | raw: {}", e, &raw_text.chars().take(100).collect::<String>()) }
+            FeishuError::ApiError { code: -1, msg: format!("JSON parse error: {}", e) }
         })?;
 
         if data.code != 0 {
             return Err(FeishuError::from_api_response(
                 data.code,
-                format!("Failed to create export task for token {}: {}", obj_token, raw_text),
+                format!("Failed to create export task for token {}: {}", obj_token, &raw_text),
             ));
         }
 
@@ -157,6 +158,17 @@ impl FeishuClient {
         );
 
         let response = self.download(&url, access_token).await?;
+
+        // 先读 body 再检查状态（response 不能在 .text() 后再访问）
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await?;
+            return Err(FeishuError::ApiError {
+                code: status.as_u16() as i32,
+                msg: format!("Download failed ({}): {}", status, body.chars().take(200).collect::<String>()),
+            });
+        }
+
         Ok(response)
     }
 
@@ -179,8 +191,9 @@ impl FeishuClient {
             .await?;
 
         // Step 3: 下载文件
+        eprintln!("[API] Downloading file_token={}", file_token);
         let response = self.download_export_file(access_token, &file_token).await?;
-        eprintln!("[API] Download response status: {:?}", response.status());
+        eprintln!("[API] Download OK, content-length: {:?}", response.content_length());
         Ok(response)
     }
 }

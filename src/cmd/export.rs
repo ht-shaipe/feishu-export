@@ -37,7 +37,7 @@ impl ExportCommand {
         // 解析格式
         let export_format = ExportFormat::from_str(format).ok_or_else(|| {
             FeishuError::ConfigError(format!(
-                "Unsupported export format: {}. Supported: docx, pdf, md, xlsx, csv",
+                "Unsupported export format: {}. Supported: auto, docx, pdf, md, xlsx, csv",
                 format
             ))
         })?;

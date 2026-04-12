@@ -11,6 +11,7 @@ pub enum ExportFormat {
     Md,
     Xlsx,
     Csv,
+    Auto,
 }
 
 impl ExportFormat {
@@ -22,6 +23,7 @@ impl ExportFormat {
             ExportFormat::Md => "md",
             ExportFormat::Xlsx => "xlsx",
             ExportFormat::Csv => "csv",
+            ExportFormat::Auto => "auto",
         }
     }
 
@@ -34,6 +36,22 @@ impl ExportFormat {
         }
     }
 
+    /// 根据节点类型自动选择最佳导出格式
+    pub fn for_node_type(obj_type: &str) -> Self {
+        match obj_type {
+            "sheet" | "bitable" => ExportFormat::Xlsx,
+            "docx" | "doc" | "mindnote" | "slides" => ExportFormat::Md,
+            "file" | "folder" | "shortcut" | "image" | "video" | "audio"
+            | "wiki" | "minutable" | "whiteboard" => ExportFormat::Auto, // 不可导出
+            _ => ExportFormat::Docx,
+        }
+    }
+
+    /// 是否需要做格式转换（md 需要先导出 docx 再转）
+    pub fn needs_conversion(&self) -> bool {
+        matches!(self, ExportFormat::Md)
+    }
+
     /// 从字符串解析导出格式
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
@@ -42,6 +60,7 @@ impl ExportFormat {
             "md" | "markdown" => Some(ExportFormat::Md),
             "xlsx" => Some(ExportFormat::Xlsx),
             "csv" => Some(ExportFormat::Csv),
+            "auto" | "" => Some(ExportFormat::Auto),
             _ => None,
         }
     }

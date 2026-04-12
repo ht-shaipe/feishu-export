@@ -102,7 +102,7 @@ impl FeishuClient {
         self.check_response(response).await
     }
 
-    /// 下载文件
+    /// 下载文件（不通过 check_response，保留 body 供调用方读取）
     pub async fn download(&self, url: &str, access_token: &str) -> Result<reqwest::Response> {
         let response = self
             .http
@@ -111,12 +111,8 @@ impl FeishuClient {
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            return Err(FeishuError::NetworkError(reqwest::Error::from(
-                response.error_for_status().unwrap_err(),
-            )));
-        }
-
+        // 不调用 check_response，直接透传 response
+        // 调用方负责读取 body（bytes / text）
         Ok(response)
     }
 

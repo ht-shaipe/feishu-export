@@ -228,30 +228,46 @@ impl ExportEngine {
         temp_dir: &Path,
         relative_path: &str,
     ) -> Result<PathBuf> {
-        // 确定文件扩展名
-        let ext = if format == ExportFormat::Md {
-            "docx" // 先导出 docx，然后转换
+        // Auto 模式：按节点类型自动选最佳格式
+        let actual_format = if format == ExportFormat::Auto {
+            let auto = ExportFormat::for_node_type(&node.obj_type);
+            eprintln!(
+                "[AUTO] {} ({}) → {}",
+                node.title, node.obj_type, auto.extension()
+            );
+            auto
         } else {
-            format.extension()
+            format
+        };
+
+        // 确定 API 导出的扩展名（md 需要先导出 docx）
+        let api_ext = actual_format.api_extension();
+        // 确定最终文件扩展名
+        let final_ext = if actual_format.needs_conversion() {
+            "md"
+        } else {
+            actual_format.extension()
         };
 
         // 导出文档
         let response = client
-            .export_document(token, &node.obj_token, &node.obj_type, format)
+            .export_document(token, &node.obj_token, &node.obj_type, actual_format)
             .await?;
 
         // 保存文件
-        let file_path = temp_dir.join(format!("{}.{}", relative_path, ext));
+        let file_path = temp_dir.join(format!("{}.{}", relative_path, final_ext));
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let bytes = response.bytes().await?;
+        eprintln!("[DOWNLOAD] {} bytes for {}", bytes.len(), file_path.display());
         fs::write(&file_path, bytes)?;
 
-        // 如果需要 MD 格式，进行转换
-        if format == ExportFormat::Md {
+        // md 格式：先导出 docx，再转 md
+        if actual_format.needs_conversion() {
             let md_path = file_path.with_extension("md");
+            eprintln!("[CONVERT] {} → {}", file_path.display(), md_path.display());
             MdConverter::docx_to_md(&file_path, &md_path)?;
             fs::remove_file(file_path)?; // 删除临时 docx
             return Ok(md_path);
