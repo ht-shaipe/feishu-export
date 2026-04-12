@@ -138,15 +138,6 @@ fn run_config(action: ConfigAction) -> ExitCode {
     }
 }
 
-fn run_logout() -> ExitCode {
-    match cmd::LoginCommand::new() {
-        Ok(c) => match c.logout() {
-            Ok(_) => ExitCode::SUCCESS,
-            Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
-        },
-        Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
-    }
-}
 
 fn run_convert(input: std::path::PathBuf, output: Option<std::path::PathBuf>, output_images: Option<std::path::PathBuf>, recursive: bool, dry_run: bool) -> ExitCode {
     match cmd::ConvertCommand::new().run(&input, output.as_deref(), output_images.as_deref(), recursive, dry_run) {
@@ -156,25 +147,7 @@ fn run_convert(input: std::path::PathBuf, output: Option<std::path::PathBuf>, ou
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Async commands (login, spaces, export) — use a dedicated runtime
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn run_async<F>(future_fn: F) -> ExitCode
-where
-    F: FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ExitCode>>>,
-{
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("{} Runtime error: {}", "❌".red(), e);
-            return ExitCode::FAILURE;
-        }
-    };
-    rt.block_on(future_fn())
-}
+// Async commands (login, spaces, export) — run directly in tokio::main
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -184,86 +157,67 @@ async fn main() -> ExitCode {
         Commands::Config { action } => run_config(action),
 
         Commands::Login { no_browser } => {
-            run_async(|| {
-                let no_browser = no_browser;
-                Box::pin(async move {
-                    match cmd::LoginCommand::new() {
-                        Ok(c) => match c.run(no_browser).await {
-                            Ok(_) => ExitCode::SUCCESS,
-                            Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
-                        },
-                        Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
-                    }
-                })
-            })
+            match cmd::LoginCommand::new() {
+                Ok(c) => match c.run(no_browser).await {
+                    Ok(_) => ExitCode::SUCCESS,
+                    Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
+                },
+                Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
+            }
         }
 
-        Commands::Logout => run_logout(),
+        Commands::Logout => {
+            match cmd::LoginCommand::new() {
+                Ok(c) => match c.logout().await {
+                    Ok(_) => ExitCode::SUCCESS,
+                    Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
+                },
+                Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
+            }
+        }
 
         Commands::Spaces { action } => {
-            run_async(|| {
-                Box::pin(async {
-                    let c = match cmd::SpacesCommand::new() {
-                        Ok(c) => c,
-                        Err(e) => { eprintln!("{} {}", "❌".red(), e); return ExitCode::FAILURE; }
-                    };
-                    let result = match action {
-                        SpacesAction::List => c.list().await,
-                        SpacesAction::Tree { space_id } => c.tree(&space_id).await,
-                        SpacesAction::Info { space_id } => c.info(&space_id).await,
-                        SpacesAction::ListDocs { space_id, filter_type, csv } => {
-                            c.list_docs(&space_id, filter_type.as_deref(), csv).await
-                        }
-                    };
-                    match result {
-                        Ok(_) => ExitCode::SUCCESS,
-                        Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
-                    }
-                })
-            })
+            let c = match cmd::SpacesCommand::new() {
+                Ok(c) => c,
+                Err(e) => { eprintln!("{} {}", "❌".red(), e); return ExitCode::FAILURE; }
+            };
+            let result = match action {
+                SpacesAction::List => c.list().await,
+                SpacesAction::Tree { space_id } => c.tree(&space_id).await,
+                SpacesAction::Info { space_id } => c.info(&space_id).await,
+                SpacesAction::ListDocs { space_id, filter_type, csv } => {
+                    c.list_docs(&space_id, filter_type.as_deref(), csv).await
+                }
+            };
+            match result {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
+            }
         }
 
         Commands::Export { space_id, format, output, node, concurrency, resume } => {
             if node.is_some() {
                 eprintln!("{}", "⚠️ --node 参数暂未实现".yellow());
             }
-            run_async(|| {
-                let space_id = space_id;
-                let format = format;
-                let output = output;
-                let node = node;
-                let concurrency = concurrency;
-                let resume = resume;
-                Box::pin(async move {
-                    let c = match cmd::ExportCommand::new() {
-                        Ok(c) => c,
-                        Err(e) => { eprintln!("{} {}", "❌".red(), e); return ExitCode::FAILURE; }
-                    };
-                    match c.run(&space_id, &format, output, node, Some(concurrency), resume).await {
-                        Ok(_) => ExitCode::SUCCESS,
-                        Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
-                    }
-                })
-            })
+            let c = match cmd::ExportCommand::new() {
+                Ok(c) => c,
+                Err(e) => { eprintln!("{} {}", "❌".red(), e); return ExitCode::FAILURE; }
+            };
+            match c.run(&space_id, &format, output, node, Some(concurrency), resume).await {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
+            }
         }
 
         Commands::ExportOne { obj_token, obj_type, format, output } => {
-            run_async(|| {
-                let obj_token = obj_token;
-                let obj_type = obj_type;
-                let format = format;
-                let output = output;
-                Box::pin(async move {
-                    let c = match cmd::ExportCommand::new() {
-                        Ok(c) => c,
-                        Err(e) => { eprintln!("{} {}", "❌".red(), e); return ExitCode::FAILURE; }
-                    };
-                    match c.run_one(&obj_token, &obj_type, &format, output).await {
-                        Ok(_) => ExitCode::SUCCESS,
-                        Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
-                    }
-                })
-            })
+            let c = match cmd::ExportCommand::new() {
+                Ok(c) => c,
+                Err(e) => { eprintln!("{} {}", "❌".red(), e); return ExitCode::FAILURE; }
+            };
+            match c.run_one(&obj_token, &obj_type, &format, output).await {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
+            }
         }
 
         Commands::Convert { input, output, output_images, recursive, dry_run } => {

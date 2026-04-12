@@ -48,7 +48,7 @@ impl NodeTreeManager {
                 break;
             }
             if let Some(parent_node) = token_to_node.get(&parent) {
-                parts.push(format!("{}_{}", parent_node.depth, parent_node.safe_filename()));
+                parts.push(parent_node.safe_filename());
                 current = parent_node.parent_node_token.clone();
             } else {
                 break;
@@ -56,7 +56,7 @@ impl NodeTreeManager {
         }
 
         parts.reverse();
-        let base = format!("{}_{}", node.depth, node.safe_filename());
+        let base = node.safe_filename();
         if parts.is_empty() {
             base
         } else {

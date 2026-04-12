@@ -83,7 +83,7 @@ impl Node {
 
     /// 飞书 export API 支持的类型
     pub fn is_exportable(&self) -> bool {
-        matches!(self.obj_type.as_str(), "docx" | "doc" | "sheet" | "bitable")
+        matches!(self.obj_type.as_str(), "docx" | "doc" | "sheet" | "bitable" | "file")
     }
 
     pub fn is_shortcut(&self) -> bool {

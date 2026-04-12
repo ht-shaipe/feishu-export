@@ -54,16 +54,43 @@ impl ExportCommand {
         println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
         println!("{}", format!("空间 ID:    {}", space_id).dimmed());
         println!("{}", format!("导出格式:    {:?}", export_format).dimmed());
+        if export_format == feishu_core::ExportFormat::Md {
+            println!("{}", "  → 将保留原有格式文件并转换为 Markdown".dimmed());
+            println!("{}", "  → 自动生成 README.md 文档索引".dimmed());
+        }
         println!("{}", format!("输出目录:    {}", output_dir.display()).dimmed());
         if resume {
             println!("{}", "断点续导:   是".dimmed());
         }
         println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+        println!();  // 空行
 
         let mut engine = ExportEngine::new(self.client.clone(), token);
         if let Some(c) = concurrency {
             engine = engine.with_concurrency(c);
         }
+
+        // Add progress display
+        let progress_display = std::sync::Arc::new(std::sync::Mutex::new(ProgressDisplay::new()));
+        engine = engine.with_progress_callback({
+            let display = progress_display.clone();
+            std::sync::Arc::new(move |node, _result, status, current, _total| {
+                let d = display.lock().unwrap();
+                // Set total on first call
+                if current == 1 {
+                    d.set_total(_total);
+                }
+                if status == "success" {
+                    d.on_success(&node.title, current, _total);
+                } else {
+                    d.on_failed(&node.title, status, current, _total);
+                }
+                // Finish on last call
+                if current == _total {
+                    d.finish();
+                }
+            })
+        });
 
         let start_time = std::time::Instant::now();
         let _zip_path = engine
@@ -120,10 +147,14 @@ impl ExportCommand {
             parent_node_token: None,
             obj_type: obj_type.to_string(),
             node_type: "origin".to_string(),
-            title: format!("doc_{}", &obj_token[..8.min(obj_token.len())]),
+            title: format!("sheet_{}", &obj_token[..8.min(obj_token.len())]),
             has_child: false,
             depth: 1,
         };
+
+        // Show resolved format
+        let resolved_format = ExportEngine::resolve_format(&node, export_format);
+        println!("  📄 解析后的导出格式: {:?}", resolved_format);
 
         let path = format!("1_{}", node.title);
         let result = ExportEngine::export_single_document(
@@ -131,6 +162,7 @@ impl ExportCommand {
             &token,
             &node,
             export_format,
+            export_format, // target_format is same as export_format for single doc export
             &temp_dir,
             &path,
         )
@@ -172,5 +204,121 @@ impl ExportCommand {
         }
 
         Ok(token_data.access_token)
+    }
+}
+
+/// 进度显示器
+struct ProgressDisplay {
+    total: std::sync::atomic::AtomicUsize,
+    start: std::time::Instant,
+    last_percent: std::sync::atomic::AtomicUsize,
+}
+
+impl ProgressDisplay {
+    fn new() -> Self {
+        Self {
+            total: std::sync::atomic::AtomicUsize::new(0),
+            start: std::time::Instant::now(),
+            last_percent: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn set_total(&self, total: usize) {
+        self.total.store(total, std::sync::atomic::Ordering::Relaxed);
+        println!();
+        println!("  📋 总文档数: {}", total.to_string().cyan().bold());
+        println!("  ⏳ 开始下载...");
+        println!();
+    }
+
+    fn on_success(&self, title: &str, current: usize, _total: usize) {
+        let total = self.total.load(std::sync::atomic::Ordering::Relaxed);
+
+        let percent = if total > 0 {
+            (current * 100) / total
+        } else {
+            0
+        };
+
+        let elapsed = self.start.elapsed().as_secs();
+        let mins = elapsed / 60;
+        let secs = elapsed % 60;
+
+        // Display progress bar
+        let bar_width = 30;
+        let filled = if total > 0 {
+            (current * bar_width) / total
+        } else {
+            0
+        };
+        let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
+        println!("  {} [{:3}%] {}/{} | {} {}",
+            bar.dimmed(),
+            percent.to_string().cyan().bold(),
+            current.to_string().dimmed(),
+            total.to_string().dimmed(),
+            "✅".green(),
+            title.dimmed()
+        );
+
+        // Show estimated time remaining every 5% or when complete
+        let last_pct = self.last_percent.load(std::sync::atomic::Ordering::Relaxed);
+        if percent >= last_pct + 5 || current == total {
+            self.last_percent.store(percent, std::sync::atomic::Ordering::Relaxed);
+
+            if elapsed > 5 && total > 0 && current > 0 {
+                let avg_time = elapsed as f64 / current as f64;
+                let remaining = total - current;
+                let est_secs = (avg_time * remaining as f64) as u64;
+                let est_mins = est_secs / 60;
+                let est_s = est_secs % 60;
+
+                println!("      ⏱️  已用: {}分{}秒 | 预计剩余: {}分{}秒",
+                    mins, secs,
+                    est_mins, est_s
+                );
+            }
+        }
+    }
+
+    fn on_failed(&self, title: &str, error: &str, current: usize, _total: usize) {
+        let total = self.total.load(std::sync::atomic::Ordering::Relaxed);
+
+        let percent = if total > 0 {
+            (current * 100) / total
+        } else {
+            0
+        };
+
+        let bar_width = 30;
+        let filled = if total > 0 {
+            (current * bar_width) / total
+        } else {
+            0
+        };
+        let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
+        println!("  {} [{:3}%] {}/{} | {} {}",
+            bar.dimmed(),
+            percent.to_string().cyan().bold(),
+            current.to_string().dimmed(),
+            total.to_string().dimmed(),
+            "❌".red(),
+            title.dimmed()
+        );
+        println!("      错误: {}", error.red());
+    }
+
+    fn finish(&self) {
+        println!();
+        let total = self.total.load(std::sync::atomic::Ordering::Relaxed);
+        let elapsed = self.start.elapsed().as_secs();
+        let mins = elapsed / 60;
+        let secs = elapsed % 60;
+
+        println!("  📊 下载完成: {} 个文档", total.to_string().cyan().bold());
+        println!("  ⏱️  总耗时: {}分{}秒", mins, secs);
+        println!();
     }
 }

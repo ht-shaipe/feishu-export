@@ -84,10 +84,9 @@ impl LoginCommand {
         Ok(())
     }
 
-    pub fn logout(&self) -> std::result::Result<(), Error> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| Error::StorageError(format!("tokio runtime: {}", e)))?;
-        rt.block_on(self.token_store.clear())
+    pub async fn logout(&self) -> std::result::Result<(), Error> {
+        self.token_store.clear()
+            .await
             .map_err(|e| Error::StorageError(e.to_string()))?;
         println!("{}", "✅ 已注销".green());
         Ok(())

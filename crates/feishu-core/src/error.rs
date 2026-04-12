@@ -59,6 +59,14 @@ pub enum FeishuCoreError {
 
     #[error("HTTP server error: {0}")]
     HttpServerError(String),
+
+    /// 文件扩展名不匹配（某些文档不支持指定格式导出）
+    #[error("File extension mismatch for document type: {doc_type}")]
+    FileExtensionMismatch { doc_type: String },
+
+    /// 文件 token 无效
+    #[error("File token invalid: {token}")]
+    FileTokenInvalid { token: String },
 }
 
 /// Result alias
@@ -71,6 +79,8 @@ impl FeishuCoreError {
             99991663 => FeishuCoreError::TokenExpired,
             1310006 => FeishuCoreError::PermissionDenied { node: msg },
             1310007 => FeishuCoreError::ExportTimeout { token: msg },
+            1069918 => FeishuCoreError::FileExtensionMismatch { doc_type: msg },
+            1069914 => FeishuCoreError::FileTokenInvalid { token: msg },
             _ => FeishuCoreError::ApiError { code, msg },
         }
     }
@@ -81,6 +91,18 @@ impl FeishuCoreError {
             self,
             FeishuCoreError::NetworkError(_)
                 | FeishuCoreError::ExportTimeout { .. }
+                | FeishuCoreError::FileExtensionMismatch { .. }
+                | FeishuCoreError::FileTokenInvalid { .. }
         )
+    }
+
+    /// 判断是否是文件扩展名不匹配错误
+    pub fn is_file_extension_mismatch(&self) -> bool {
+        matches!(self, FeishuCoreError::FileExtensionMismatch { .. })
+    }
+
+    /// 判断是否是文件 token 无效错误
+    pub fn is_file_token_invalid(&self) -> bool {
+        matches!(self, FeishuCoreError::FileTokenInvalid { .. })
     }
 }

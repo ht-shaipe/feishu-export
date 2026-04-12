@@ -264,25 +264,45 @@ impl FeishuClient {
 
     /// Create an export task and return the ticket
     pub async fn create_export_task(&self, token: &str, obj_token: &str, obj_type: &str, format: ExportFormat) -> Result<String> {
-        let doc_type = match obj_type {
-            "docx" | "doc" | "sheet" | "bitable" | "file" => obj_type,
-            _ => {
+        // Check if the document type supports export
+        match obj_type {
+            "file" => {
+                return Err(Error::UnsupportedType { doc_type: format!("file (direct download): {}", obj_token) });
+            }
+            "mindnote" | "slides" => {
                 return Err(Error::UnsupportedType { doc_type: obj_type.to_string() });
             }
+            _ => {}
+        }
+
+        // Resolve Auto to actual format before calling API
+        let actual_format = if format == ExportFormat::Auto {
+            ExportFormat::for_node_type(obj_type)
+        } else {
+            format
         };
+
+        let file_extension = actual_format.api_extension();
 
         let body = json!({
             "token": obj_token,
-            "type": doc_type,
-            "file_extension": format.api_extension(),
+            "type": obj_type,
+            "file_extension": file_extension,
         });
+
+        println!("  📤 创建导出任务...");
+        println!("    - 对象 token: {}", obj_token);
+        println!("    - 对象类型: {}", obj_type);
+        println!("    - 文件扩展名: {}", file_extension);
 
         let resp = self.post("/open-apis/drive/v1/export_tasks", token, body).await?;
         let data: CreateExportTaskResponse = resp.json().await?;
         if data.code != 0 {
-            return Err(Error::from_api_response(data.code, format!("create_export_task failed for {}", obj_token)));
+            return Err(Error::from_api_response(data.code, format!("create_export_task failed for {} (type={}, ext={})", obj_token, obj_type, file_extension)));
         }
-        Ok(data.data.ticket)
+        let ticket = data.data.ticket;
+        println!("  ✅ 导出任务创建成功，ticket: {}", ticket);
+        Ok(ticket)
     }
 
     /// Poll export task status until complete, return file_token
@@ -297,18 +317,28 @@ impl FeishuClient {
                 "/open-apis/drive/v1/export_tasks/{}?token={}",
                 ticket, obj_token
             );
+
+            println!("  🔄 检查导出任务状态 (尝试 {}/{})...", attempts, max_attempts);
             let resp = self.get(&url, token).await?;
             let data: ExportTaskStatusResponse = resp.json().await?;
 
             if data.code != 0 {
-                return Err(Error::from_api_response(data.code, format!("poll_export_task failed for ticket {}", ticket)));
+                let err = Error::from_api_response(data.code, format!("poll_export_task failed for ticket {}", ticket));
+                println!("  🚨 错误转换: code={}, type={:?}", data.code, err);
+                return Err(err);
             }
 
             let is_complete = data.data.result.extra.is_complete == "true";
             let file_token = data.data.result.file_token.clone();
 
+            println!("    - 完成状态: {}", is_complete);
+            println!("    - 文件 token: '{}'", file_token);
+            println!("    - 扩展名: {}", data.data.result.file_extension);
+            println!("    - 文件名: {}", data.data.result.file_name);
+
             if is_complete {
                 if file_token.is_empty() {
+                    println!("  ⚠️ 任务已完成但文件 token 为空");
                     return Err(Error::ExportTimeout { token: obj_token.to_string() });
                 }
                 return Ok(file_token);
@@ -337,16 +367,53 @@ impl FeishuClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(Error::ApiError {
+            let api_error = Error::ApiError {
                 code: status.as_u16() as i32,
                 msg: format!("download failed ({}): {}", status, &body[..body.len().min(300)]),
-            });
+            };
+            println!("  🚨 下载错误: {:?}", api_error);
+            return Err(api_error);
         }
         Ok(resp)
     }
 
     /// Full export flow: create → poll → download
+    /// Falls back to PDF if the requested format is not supported by the node type
     pub async fn export_document(
+        &self,
+        token: &str,
+        obj_token: &str,
+        obj_type: &str,
+        format: ExportFormat,
+    ) -> Result<reqwest::Response> {
+        // Try with requested format first
+        let result = self.do_export(token, obj_token, obj_type, format).await;
+
+        // If failed due to file extension mismatch or file token invalid, retry with PDF (most compatible fallback)
+        if let Err(err) = &result {
+            println!("  ❌ 初始导出失败: {}", err);
+            println!("  🔍 错误类型检查:");
+            println!("    - is_file_extension_mismatch: {}", err.is_file_extension_mismatch());
+            println!("    - is_file_token_invalid: {}", err.is_file_token_invalid());
+
+            if err.is_file_extension_mismatch() || err.is_file_token_invalid() {
+                // PDF is the most compatible format for all document types
+                if format != ExportFormat::Pdf {
+                    println!("    ⚠️ 尝试降级到 PDF 格式...");
+                    return self.do_export(token, obj_token, obj_type, ExportFormat::Pdf).await;
+                } else {
+                    println!("    ⚠️ 已经是 PDF 格式，无法降级");
+                }
+            } else {
+                println!("    ⚠️ 错误类型不匹配，不尝试降级");
+            }
+        }
+
+        result
+    }
+
+    /// Internal export: create → poll → download (no fallback)
+    async fn do_export(
         &self,
         token: &str,
         obj_token: &str,

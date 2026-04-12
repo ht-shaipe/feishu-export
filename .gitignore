@@ -1,4 +1,3 @@
-```
 # Build artifacts
 target/
 
@@ -29,5 +28,4 @@ htmlcov/
 
 # MyPy
 .mypy_cache/
-```
 

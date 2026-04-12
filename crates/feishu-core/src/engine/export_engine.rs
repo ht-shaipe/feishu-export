@@ -13,9 +13,11 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
+use reqwest;
 
 /// Progress callback: called after each node is processed (success or failure)
-pub type ProgressCallback = Arc<dyn Fn(Node, Option<PathBuf>, &str) + Send + Sync>;
+/// Parameters: node, result_path, status, current, total
+pub type ProgressCallback = Arc<dyn Fn(Node, Option<PathBuf>, &str, usize, usize) + Send + Sync>;
 
 /// Batch export engine
 pub struct ExportEngine {
@@ -57,7 +59,11 @@ impl ExportEngine {
     ) -> Result<PathBuf> {
         // For md format, we first export in original format, then convert to md
         let is_md_export = format == ExportFormat::Md;
-        let initial_format = if is_md_export { ExportFormat::Auto } else { format };
+        let initial_format = if is_md_export {
+            ExportFormat::Auto
+        } else {
+            format
+        };
 
         // Build node tree
         let nodes = self.client.get_node_tree(&self.access_token, space_id).await?;
@@ -78,7 +84,7 @@ impl ExportEngine {
             ExportCache::new(space_id.to_string(), initial_format)
         };
 
-        let remaining: Vec<Node> = nodes
+        let remaining: Vec<Node> = nodes.clone()
             .into_iter()
             .filter(|n| !cache.is_completed(&n.obj_token))
             .collect();
@@ -122,6 +128,8 @@ impl ExportEngine {
                 .cloned()
                 .unwrap_or_else(|| format!("{}/{}", node.depth, node.safe_filename()));
             let export_format = initial_format;
+            let target_format = format; // Pass the original format to determine output location
+            let total_clone = total;
 
             let handle: JoinHandle<Result<()>> = tokio::spawn(async move {
                 let _permit = sem_clone.acquire().await
@@ -132,6 +140,7 @@ impl ExportEngine {
                     &token,
                     &node,
                     export_format,
+                    target_format,
                     &temp_dir_clone,
                     &path,
                 )
@@ -146,7 +155,8 @@ impl ExportEngine {
                         cache_clone.mark_completed(node_obj_token_saved.clone());
                         let _ = export_log_clone.append_success(&node_title, &node_obj_token_saved, &node_type, &local_path);
                         if let Some(ref cb) = cb_clone {
-                            cb(node, Some(local_path), "success");
+                            let current = prog.completed;
+                            cb(node, Some(local_path), "success", current, total_clone);
                         }
                     }
                     Err(e) => {
@@ -155,7 +165,8 @@ impl ExportEngine {
                         let err_msg = e.to_string();
                         let _ = export_log_clone.append_failed(&node_title, &node_obj_token_saved, &node_type, &err_msg);
                         if let Some(ref cb) = cb_clone {
-                            cb(node, None, &err_msg);
+                            let current = prog.completed + prog.failed;
+                            cb(node, None, &err_msg, current, total_clone);
                         }
                     }
                 }
@@ -175,12 +186,204 @@ impl ExportEngine {
         // Save cache
         let _ = self.cache_store.save(&cache).await;
 
+        // If md format, convert all documents and generate README
+        let final_dir = if is_md_export {
+            println!("\n📝 转换为 Markdown 格式...");
+            let converted_dir = self.convert_to_md_and_generate_readme(&temp_dir, &nodes, space_id, &path_map, &cache)?;
+            converted_dir
+        } else {
+            temp_dir.clone()
+        };
+
         // Package into ZIP
-        let zip_path = self.create_zip(&temp_dir, output_dir, space_id)?;
+        let zip_path = self.create_zip(&final_dir, output_dir, space_id)?;
         fs::remove_dir_all(&temp_dir)
             .map_err(Error::IoError)?;
 
         Ok(zip_path)
+    }
+
+    /// Convert all exported documents to Markdown and generate README.md
+    fn convert_to_md_and_generate_readme(
+        &self,
+        temp_dir: &Path,
+        nodes: &[Node],
+        space_id: &str,
+        path_map: &std::collections::HashMap<String, String>,
+        cache: &ExportCache,
+    ) -> Result<PathBuf> {
+        use std::collections::HashMap;
+
+        // Build a map of obj_token -> node for quick lookup
+        let node_map: HashMap<&str, &Node> = nodes.iter()
+            .map(|n| (n.obj_token.as_str(), n))
+            .collect();
+
+        // Origin directory contains original format files
+        let origin_dir = temp_dir.join("origin");
+        if !origin_dir.exists() {
+            return Ok(temp_dir.to_path_buf());
+        }
+
+        // Collect all exported files and convert them
+        let mut conversion_results: HashMap<String, (String, bool)> = HashMap::new();
+
+        for entry in walkdir::WalkDir::new(&origin_dir)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+
+            let ext = path.extension().and_then(|s| s.to_str());
+            if ext == Some("docx") {
+                // Get relative path from origin directory
+                let relative = path.strip_prefix(&origin_dir)
+                    .map_err(Error::StripPrefixError)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+
+                // Convert docx to md in root directory
+                let md_path = temp_dir.join(format!("{}.md", relative.trim_end_matches(".docx")));
+                if let Some(parent) = md_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(Error::IoError)?;
+                }
+
+                let filename = path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?");
+                println!("  转换: {} -> {}.md", filename, relative.trim_end_matches(".docx"));
+
+                match crate::engine::MdConverter::docx_to_md(path, &md_path) {
+                    Ok(()) => {
+                        // Store conversion result (relative path, success)
+                        let md_relative = format!("{}.md", relative.trim_end_matches(".docx"));
+                        conversion_results.insert(relative.clone(), (md_relative, true));
+                    }
+                    Err(e) => {
+                        println!("    转换失败: {}", e);
+                        conversion_results.insert(relative.clone(), (relative, false));
+                    }
+                }
+            } else if ext == Some("xlsx") || ext == Some("csv") {
+                // Copy spreadsheets to root directory
+                let relative = path.strip_prefix(&origin_dir)
+                    .map_err(Error::StripPrefixError)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+
+                let dest_path = temp_dir.join(&relative);
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(Error::IoError)?;
+                }
+
+                fs::copy(path, &dest_path)
+                    .map_err(Error::IoError)?;
+
+                conversion_results.insert(relative.clone(), (relative.clone(), true));
+            }
+        }
+
+        // Generate README.md
+        let readme_path = temp_dir.join("README.md");
+        let mut readme_content = String::new();
+
+        readme_content.push_str(&format!("# 飞书知识库导出\n\n"));
+        readme_content.push_str(&format!("**空间 ID:** `{}`\n\n", space_id));
+        readme_content.push_str(&format!("**导出时间:** {}\n\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+        readme_content.push_str(&format!("**文档数量:** {}\n\n", nodes.len()));
+        readme_content.push_str("---\n\n");
+        readme_content.push_str("## 📂 目录说明\n\n");
+        readme_content.push_str("- **根目录** - Markdown 格式文档（推荐阅读）\n");
+        readme_content.push_str("- **`origin/`** - 原始格式文档（docx/xlsx 等）\n\n");
+        readme_content.push_str("---\n\n");
+
+        // Build tree structure
+        readme_content.push_str("## 📁 文档结构\n\n");
+
+        // Group nodes by depth and sort by original path
+        let mut sorted_nodes: Vec<&Node> = nodes.iter().collect();
+        sorted_nodes.sort_by_key(|n| {
+            path_map.get(&n.obj_token)
+                .cloned()
+                .unwrap_or_else(|| format!("{}/{}", n.depth, n.safe_filename()))
+        });
+
+        for node in &sorted_nodes {
+            let indent = "  ".repeat((node.depth.saturating_sub(1).min(10)) as usize);
+            let relative_path = path_map.get(&node.obj_token)
+                .cloned()
+                .unwrap_or_else(|| format!("{}/{}", node.depth, node.safe_filename()));
+
+            // Determine file type and paths
+            let obj_type_lower = node.obj_type.to_lowercase();
+            let (md_path, origin_path) = if obj_type_lower.contains("sheet") || obj_type_lower.contains("bitable") {
+                // Spreadsheet files
+                let xlsx_path = format!("{}.xlsx", relative_path);
+                (None, xlsx_path)
+            } else {
+                // Document files
+                let md = format!("{}.md", relative_path);
+                let origin = format!("{}.docx", relative_path);
+                (Some(md), origin)
+            };
+
+            let is_converted = md_path.as_ref()
+                .and_then(|p| conversion_results.get(p))
+                .is_some();
+            let is_failed = cache.failed.contains(&node.obj_token);
+
+            let status_icon = if is_failed {
+                "❌"
+            } else if is_converted {
+                "✅"
+            } else {
+                "⚠️"
+            };
+
+            // Build file links
+            let file_links = if let Some(md) = md_path {
+                if is_converted {
+                    format!("[`{}`]({}) [原格式]({})", node.title, md, format!("origin/{}", origin_path))
+                } else {
+                    format!("[`{}`]({})", node.title, format!("origin/{}", origin_path))
+                }
+            } else {
+                format!("[`{}`]({})", node.title, format!("origin/{}", origin_path))
+            };
+
+            readme_content.push_str(&format!("{}{} {}\n", indent, status_icon, file_links));
+        }
+
+        readme_content.push_str("\n---\n\n");
+        readme_content.push_str("## 📊 导出统计\n\n");
+        readme_content.push_str(&format!("- **总计:** {} 个文档\n", nodes.len()));
+        readme_content.push_str(&format!("- **成功:** {} 个\n", cache.completed.len()));
+        readme_content.push_str(&format!("- **失败:** {} 个\n", cache.failed.len()));
+
+        if !cache.failed.is_empty() {
+            readme_content.push_str("\n### ❌ 失败列表\n\n");
+            for obj_token in &cache.failed {
+                if let Some(node) = node_map.get(obj_token.as_str()) {
+                    readme_content.push_str(&format!("- `{}` ({})\n", node.title, node.obj_type));
+                }
+            }
+        }
+
+        readme_content.push_str("\n---\n\n");
+        readme_content.push_str("*本文件由 [feishu-export](https://github.com/xxx/feishu-export) 自动生成*\n");
+
+        fs::write(&readme_path, readme_content)
+            .map_err(Error::IoError)?;
+
+        println!("\n  ✅ README.md 生成完成");
+
+        Ok(temp_dir.to_path_buf())
     }
 
     /// Export a single document
@@ -189,50 +392,289 @@ impl ExportEngine {
         token: &str,
         node: &Node,
         format: ExportFormat,
+        target_format: ExportFormat,
         temp_dir: &Path,
         relative_path: &str,
     ) -> Result<PathBuf> {
-        let actual_format = Self::resolve_format(node, format);
+        // Step 1: Determine the expected file extension (before any network requests)
+        let expected_ext: String = if node.obj_type == "file" {
+            // Extract file extension from title
+            if let Some(ext) = std::path::Path::new(&node.title).extension() {
+                ext.to_string_lossy().to_lowercase()
+            } else {
+                // Default to bin if no extension in title
+                "bin".to_string()
+            }
+        } else {
+            // For docx/doc/sheet/bitable: resolve format first
+            Self::resolve_format(node, format).extension().to_string()
+        };
 
-        let response = client
-            .export_document(token, &node.obj_token, &node.obj_type, actual_format)
-            .await?;
+        // Step 2: Build the file path and check if it already exists
+        let file_path = if target_format == ExportFormat::Md {
+            temp_dir.join("origin").join(format!("{}.{}", relative_path, expected_ext))
+        } else {
+            temp_dir.join(format!("{}.{}", relative_path, expected_ext))
+        };
 
-        let final_ext = if actual_format.needs_conversion() { "md" } else { actual_format.extension() };
-        let file_path = temp_dir.join(format!("{}.{}", relative_path, final_ext));
+        // Early return if file already exists (no network request needed!)
+        if file_path.exists() {
+            return Ok(file_path);
+        }
 
-        if let Some(parent) = file_path.parent() {
+        // Step 3: File doesn't exist, proceed with download
+        let (response, file_ext_from_title): (reqwest::Response, Option<String>) = if node.obj_type == "file" {
+            // For file type: try direct download first, fall back to export API if it fails
+            let direct_download_result = Self::try_direct_download(&node, client, token, &expected_ext).await;
+
+            if let Ok(resp) = direct_download_result {
+                (resp, Some(expected_ext.clone()))
+            } else {
+                // Fallback: try using export API (works for uploaded files like xlsx/docx)
+                // Use obj_type from node info if available, otherwise try "sheet" for xlsx files
+                let fallback_format = if expected_ext == "xlsx" {
+                    ExportFormat::Xlsx
+                } else if expected_ext == "docx" {
+                    ExportFormat::Docx
+                } else {
+                    ExportFormat::Pdf
+                };
+
+                println!("    ⚠️ 直接下载失败，尝试导出 API (ext={})...", expected_ext);
+                let resp = client
+                    .export_document(token, &node.obj_token, &node.obj_type, fallback_format)
+                    .await?;
+                (resp, None)
+            }
+        } else {
+            // For docx/doc/sheet/bitable: use export API
+            let resolved_format = Self::resolve_format(node, format);
+
+            // Try with the resolved format first
+            let resp = match client
+                .export_document(token, &node.obj_token, &node.obj_type, resolved_format)
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // If we get FileTokenInvalid, try with PDF as fallback
+                    if e.is_file_token_invalid() {
+                        println!("    ⚠️ 文件 token 无效，尝试降级到 PDF 格式...");
+                        match client
+                            .export_document(token, &node.obj_token, &node.obj_type, ExportFormat::Pdf)
+                            .await
+                        {
+                            Ok(resp) => resp,
+                            Err(_e2) => {
+                                // If PDF also fails, return the original error
+                                return Err(e);
+                            }
+                        }
+                    } else {
+                        // Return other errors as-is
+                        return Err(e);
+                    }
+                }
+            };
+
+            (resp, None)
+        };
+
+        // Extract actual file extension from Content-Disposition header
+        // (API may fall back to a different format, so header reflects the truth)
+        let final_ext: String = if let Some(ext) = file_ext_from_title {
+            // Use extension from file title for file types
+            ext
+        } else {
+            Self::extract_extension_from_response(&response)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    // Fallback to the expected extension we determined earlier
+                    expected_ext.clone()
+                })
+        };
+
+        // Rebuild file path with actual extension (may differ from expected)
+        let actual_file_path = if target_format == ExportFormat::Md {
+            temp_dir.join("origin").join(format!("{}.{}", relative_path, final_ext))
+        } else {
+            temp_dir.join(format!("{}.{}", relative_path, final_ext))
+        };
+
+        // Check again with actual extension (in case it differs)
+        if actual_file_path != file_path && actual_file_path.exists() {
+            return Ok(actual_file_path);
+        }
+
+        if let Some(parent) = actual_file_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(Error::IoError)?;
         }
 
         let bytes = response.bytes().await
             .map_err(Error::NetworkError)?;
-        fs::write(&file_path, &bytes)
+        fs::write(&actual_file_path, &bytes)
             .map_err(Error::IoError)?;
 
-        if actual_format.needs_conversion() {
-            let md_path = file_path.with_extension("md");
-            crate::engine::MdConverter::docx_to_md(&file_path, &md_path)
-                .map_err(|e| Error::ConversionError(e.to_string()))?;
-            fs::remove_file(&file_path)
-                .map_err(Error::IoError)?;
-            return Ok(md_path);
-        }
-
-        Ok(file_path)
+        Ok(actual_file_path)
     }
 
-    fn resolve_format(node: &Node, format: ExportFormat) -> ExportFormat {
-        if format != ExportFormat::Auto {
+    /// Extract file extension from HTTP Content-Disposition header
+    fn extract_extension_from_response(response: &reqwest::Response) -> Option<&'static str> {
+        let headers = response.headers();
+        if let Some(content_disposition) = headers.get("Content-Disposition") {
+            if let Ok(cd_str) = content_disposition.to_str() {
+                // Content-Disposition: attachment; filename="xxx.docx" or filename*=UTF-8''xxx.docx
+                if let Some(filename) = Self::extract_filename_from_cd(cd_str) {
+                    if let Some(ext) = Path::new(filename.as_str()).extension() {
+                        let ext_str = ext.to_string_lossy().to_lowercase();
+                        // Map common extensions to our ExportFormat extensions
+                        return Some(match ext_str.as_str() {
+                            "docx" => "docx",
+                            "pdf" => "pdf",
+                            "md" => "md",
+                            "xlsx" => "xlsx",
+                            "csv" => "csv",
+                            _ => return None,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Parse filename from Content-Disposition header (handles both plain and RFC 5987 encoded)
+    fn extract_filename_from_cd(cd: &str) -> Option<String> {
+        // Try filename*=UTF-8''... (RFC 5987 encoding)
+        if let Some(pos) = cd.find("filename*=UTF-8''") {
+            let after_prefix = &cd[pos + 17..];
+            // Decode percent-encoded characters
+            let decoded = Self::decode_percent(after_prefix);
+            return Some(decoded);
+        }
+        // Try simple filename="..."
+        if let Some(pos) = cd.find("filename=\"") {
+            let start = pos + 10;
+            if let Some(end) = cd[start..].find('"') {
+                return Some(cd[start..start + end].to_string());
+            }
+        }
+        None
+    }
+
+    /// Decode RFC 5987 percent-encoded strings
+    fn decode_percent(s: &str) -> String {
+        let mut result = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                let hex: String = chars.by_ref().take(2).collect();
+                if hex.len() == 2 {
+                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                        result.push(byte as char);
+                    } else {
+                        result.push('%');
+                        result.push_str(&hex);
+                    }
+                } else {
+                    result.push('%');
+                    result.push_str(&hex);
+                    break;
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    /// Try direct download of a file node (fallback for export API)
+    async fn try_direct_download(
+        node: &Node,
+        client: &FeishuClient,
+        token: &str,
+        _expected_ext: &str,
+    ) -> Result<reqwest::Response> {
+        // For file type: get node info first to find the download link
+        let node_info = match client.get_node_info(token, &node.node_token).await {
+            Ok(info) => info,
+            Err(e) => {
+                // If get_node_info fails (e.g., JSON decode error from API), return the error
+                // so we can fall back to export API
+                return Err(e);
+            }
+        };
+
+        // Download the file directly using the link
+        let download_url = if node_info.link.is_empty() {
+            return Err(Error::ConversionError(format!(
+                "File has no download link: {} (obj_type={})",
+                node.title, node_info.obj_type
+            )));
+        } else {
+            node_info.link
+        };
+
+        // Make download request (don't follow redirects automatically to avoid HTML responses)
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none()) // Don't follow redirects to avoid HTML error pages
+            .build()
+            .map_err(Error::NetworkError)?;
+
+        let resp = http.get(&download_url)
+            .send()
+            .await
+            .map_err(Error::NetworkError)?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            // If redirect happened (3xx), try following it once to get the actual file
+            if status.is_redirection() {
+                if let Some(location) = resp.headers().get("location") {
+                    let redirect_url = location.to_str().unwrap_or_default();
+                    println!("    → 重定向到: {}", &redirect_url[..redirect_url.len().min(80)]);
+                    let resp2 = http.get(redirect_url)
+                        .send()
+                        .await
+                        .map_err(Error::NetworkError)?;
+                    if resp2.status().is_success() {
+                        return Ok(resp2);
+                    }
+                }
+            }
+            return Err(Error::ApiError {
+                code: status.as_u16() as i32,
+                msg: format!("download failed with status: {} (url: {})", status, download_url),
+            });
+        }
+
+        Ok(resp)
+    }
+
+    /// Resolve the format for API call: Auto → node type default, Docx → Xlsx for sheets
+    pub fn resolve_format(node: &Node, format: ExportFormat) -> ExportFormat {
+        if format == ExportFormat::Auto {
+            ExportFormat::for_node_type(&node.obj_type)
+        } else {
+            // For docx nodes requesting docx, Feishu API may fall back internally
+            // For sheet/bitable requesting docx, force to xlsx
             if format == ExportFormat::Docx
                 && (node.obj_type == "sheet" || node.obj_type == "bitable")
             {
-                return ExportFormat::Xlsx;
+                ExportFormat::Xlsx
+            } else if format == ExportFormat::Xlsx
+                // If user specifically requested xlsx but the node is not a spreadsheet,
+                // fallback to the appropriate format for the node type
+                && !matches!(node.obj_type.as_str(), "sheet" | "bitable")
+            {
+                // For non-spreadsheet documents, use the default format for the node type
+                ExportFormat::for_node_type(&node.obj_type)
+            } else {
+                format
             }
-            return format;
         }
-        ExportFormat::for_node_type(&node.obj_type)
     }
 
     /// Package temp directory into a ZIP file
