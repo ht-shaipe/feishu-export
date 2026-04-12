@@ -87,11 +87,12 @@ impl Node {
         self.obj_type == "folder"
     }
 
-    /// 判断是否支持导出
+    /// 判断是否支持导出（飞书 export API 支持的类型）
+    /// 注意：file/folder/shortcut 等类型不支持通过 export API 导出
     pub fn is_exportable(&self) -> bool {
         matches!(
             self.obj_type.as_str(),
-            "docx" | "doc" | "sheet" | "bitable" | "file"
+            "docx" | "doc" | "sheet" | "bitable"
         )
     }
 

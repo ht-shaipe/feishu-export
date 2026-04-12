@@ -122,15 +122,31 @@ impl FeishuClient {
 
     /// 检查响应状态
     async fn check_response(&self, response: Response) -> Result<Response> {
-        // 检查 HTTP 状态
-        if !response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+
+        // 非 2xx: 先读 body 再抛错，保留飞书返回的 error message
+        let body = response.text().await.unwrap_or_default();
+        let short = body.chars().take(300).collect::<String>();
+
+        eprintln!("[API] HTTP error body: {}", short);
+
+        // 尝试解析飞书错误格式
+        if let Ok(feishu_err) = serde_json::from_str::<serde_json::Value>(&body) {
+            let code = feishu_err.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let msg = feishu_err.get("msg").and_then(|v| v.as_str()).unwrap_or(&short);
             return Err(FeishuError::ApiError {
-                code: response.status().as_u16() as i32,
-                msg: format!("HTTP {}", response.status()),
+                code: code as i32,
+                msg: format!("code={}, msg={}", code, msg),
             });
         }
 
-        Ok(response)
+        Err(FeishuError::ApiError {
+            code: status.as_u16() as i32,
+            msg: short,
+        })
     }
 }
 
