@@ -1,0 +1,16 @@
+[package]
+name = "doc-converter"
+version = "0.1.0"
+edition = "2021"
+authors = ["Feishu Export Team"]
+description = "Pure Rust docx to Markdown converter (no external tools)"
+license = "MIT"
+repository = "https://github.com/xxx/feishu-export"
+keywords = ["docx", "markdown", "convert"]
+rust-version = "1.70"
+readme = "README.md"
+
+[dependencies]
+docx = "1.1"
+thiserror = "1"
+zip = "2"

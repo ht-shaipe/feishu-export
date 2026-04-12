@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/doc-md", "crates/feishu-core"]
+members = ["crates/doc-converter", "crates/feishu-core"]
 
 [package]
 name = "feishu-export"
@@ -15,7 +15,7 @@ rust-version = "1.70"
 [dependencies]
 # 本地 crates
 feishu-core = { path = "crates/feishu-core" }
-doc-md = { path = "crates/doc-md", features = ["async"] }
+doc-converter = { path = "crates/doc-converter" }
 
 # CLI 框架
 clap = { version = "4.4", features = ["derive", "env"] }

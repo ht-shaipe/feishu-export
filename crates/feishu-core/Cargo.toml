@@ -35,7 +35,7 @@ sanitize-filename = "0.5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # 内部 crate
-doc-md = { path = "../doc-md", features = ["async"] }
+doc-converter = { path = "../doc-converter" }
 
 [dev-dependencies]
 tempfile = "3"
