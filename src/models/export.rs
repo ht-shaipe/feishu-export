@@ -26,8 +26,12 @@ impl ExportFormat {
     }
 
     /// 获取对应的飞书 API file_extension 参数
+    /// md 格式没有直接的 API 支持，必须先导出 docx 再转 md
     pub fn api_extension(&self) -> &str {
-        self.extension()
+        match self {
+            ExportFormat::Md => "docx",
+            _ => self.extension(),
+        }
     }
 
     /// 从字符串解析导出格式
