@@ -555,11 +555,6 @@ impl Converter {
                 .map_err(|e| Error::Parse(format!("read xml: {}", e)))?;
         }
 
-        // Remove tables from XML so paragraph regex doesn't pick up table-cell paragraphs.
-        // Tables are processed separately in the "Tables" section below.
-        let table_re = Regex::new(r"(?s)<w:tbl>.*?</w:tbl>").unwrap();
-        let xml_no_tables = table_re.replace_all(&xml, "").to_string();
-
         let para_re = Regex::new(r"(?s)<w:p[ >].*?</w:p>").unwrap();
         let text_re  = Regex::new(r"<w:t[^>]*>([^<]*)</w:t>").unwrap();
 
@@ -579,8 +574,8 @@ impl Converter {
         let _drawing_order = drawing_order; // consumed by drawing_map in caller
 
         // ── Collect all top-level elements (paragraphs and tables) by position ──
-        // Tables are matched in original xml; paragraphs are matched in xml_no_tables
-        // (which has tables removed), so all matched paragraphs are body-level.
+        // We use the original xml to get correct positions, then filter out paragraphs
+        // that are actually inside tables using position ranges.
 
         let table_re  = Regex::new(r"(?s)<w:tbl>.*?</w:tbl>").unwrap();
         let row_re    = Regex::new(r"(?s)<w:tr[ >].*?</w:tr>").unwrap();
@@ -599,8 +594,28 @@ impl Converter {
 
         let mut elements: Vec<Element> = Vec::new();
 
-        // Collect body paragraphs (from xml_no_tables, so they're definitely not in tables)
-        for para_match in para_re.find_iter(&xml_no_tables) {
+        // First, collect all table ranges so we can filter out paragraphs inside them
+        let mut table_ranges: Vec<(usize, usize)> = Vec::new();
+        for tbl_match in table_re.find_iter(&xml) {
+            table_ranges.push((tbl_match.start(), tbl_match.end()));
+        }
+
+        // Helper to check if a position is inside any table
+        let is_inside_table = |pos: usize| -> bool {
+            for (start, end) in &table_ranges {
+                if *start <= pos && pos < *end {
+                    return true;
+                }
+            }
+            false
+        };
+
+        // Collect body paragraphs from original xml, filtering out those inside tables
+        for para_match in para_re.find_iter(&xml) {
+            // Skip if this paragraph is inside any table
+            if is_inside_table(para_match.start()) {
+                continue;
+            }
             elements.push(Element {
                 kind: ElementKind::Para,
                 start: para_match.start(),

@@ -55,6 +55,10 @@ impl ExportEngine {
         output_dir: &Path,
         resume: bool,
     ) -> Result<PathBuf> {
+        // For md format, we first export in original format, then convert to md
+        let is_md_export = format == ExportFormat::Md;
+        let initial_format = if is_md_export { ExportFormat::Auto } else { format };
+
         // Build node tree
         let nodes = self.client.get_node_tree(&self.access_token, space_id).await?;
 
@@ -68,10 +72,10 @@ impl ExportEngine {
 
         // Load resume cache
         let mut cache = if resume {
-            self.cache_store.load(space_id, format.extension()).await
-                .unwrap_or_else(|_| ExportCache::new(space_id.to_string(), format))
+            self.cache_store.load(space_id, initial_format.extension()).await
+                .unwrap_or_else(|_| ExportCache::new(space_id.to_string(), initial_format))
         } else {
-            ExportCache::new(space_id.to_string(), format)
+            ExportCache::new(space_id.to_string(), initial_format)
         };
 
         let remaining: Vec<Node> = nodes
@@ -117,7 +121,7 @@ impl ExportEngine {
                 .get(&node.obj_token)
                 .cloned()
                 .unwrap_or_else(|| format!("{}/{}", node.depth, node.safe_filename()));
-            let format = format;
+            let export_format = initial_format;
 
             let handle: JoinHandle<Result<()>> = tokio::spawn(async move {
                 let _permit = sem_clone.acquire().await
@@ -127,7 +131,7 @@ impl ExportEngine {
                     &client,
                     &token,
                     &node,
-                    format,
+                    export_format,
                     &temp_dir_clone,
                     &path,
                 )
