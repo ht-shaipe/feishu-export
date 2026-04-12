@@ -360,6 +360,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "doc-md"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -398,6 +408,7 @@ dependencies = [
  "colored",
  "console",
  "dirs",
+ "doc-md",
  "figment",
  "glob",
  "indicatif",

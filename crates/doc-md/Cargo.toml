@@ -1,0 +1,23 @@
+[package]
+name = "doc-md"
+version = "0.1.0"
+edition = "2021"
+authors = ["Feishu Export Team"]
+description = "Pure Rust docx to Markdown converter powered by pandoc"
+license = "MIT"
+repository = "https://github.com/xxx/feishu-export"
+keywords = ["docx", "markdown", "convert", "pandoc"]
+rust-version = "1.70"
+readme = "README.md"
+
+[dependencies]
+thiserror = "1"
+anyhow = "1"
+tokio = { version = "1", optional = true, features = ["process"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+async = ["dep:tokio"]

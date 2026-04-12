@@ -2,7 +2,7 @@ use crate::error::{FeishuError, Result};
 use std::path::Path;
 use std::process::Command;
 
-/// Markdown 转换器
+/// Markdown 转换器（thin wrapper around `doc-md`）
 ///
 /// 飞书不直接支持导出 MD，使用 pandoc 将 docx 转换为 md
 pub struct MdConverter;
@@ -12,7 +12,6 @@ impl MdConverter {
     ///
     /// 需要系统安装 pandoc: https://pandoc.org/installing.html
     pub fn docx_to_md(docx_path: &Path, md_path: &Path) -> Result<()> {
-        // 检查 pandoc 是否可用
         if !Self::check_pandoc() {
             return Err(FeishuError::ConversionError(
                 "pandoc not found. Please install pandoc from https://pandoc.org/installing.html"
@@ -20,7 +19,6 @@ impl MdConverter {
             ));
         }
 
-        // 使用 pandoc 转换
         let output = Command::new("pandoc")
             .arg(docx_path)
             .arg("-f")
@@ -30,7 +28,9 @@ impl MdConverter {
             .arg("-o")
             .arg(md_path)
             .output()
-            .map_err(|e| FeishuError::ConversionError(format!("Failed to run pandoc: {}", e)))?;
+            .map_err(|e| {
+                FeishuError::ConversionError(format!("Failed to run pandoc: {}", e))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
