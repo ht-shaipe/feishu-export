@@ -588,6 +588,13 @@ impl Converter {
             let raw_text = text_parts.join("");
             if !raw_text.trim().is_empty() {
                 let formatted = Self::format_text_with_styles(para_xml, &text_re, &bold_re, &italic_re, &strike_re);
+                
+                // Check for code style (Code, InlineCode, etc.)
+                let is_code_style = para_xml.contains(r#"w:val="Code""#) || 
+                                    para_xml.contains(r#"w:val="InlineCode""#) ||
+                                    para_xml.contains(r#"w:val="code""#) ||
+                                    para_xml.contains(r#"w:val="inlinecode""#);
+                
                 let line = if !formatted.trim().is_empty() {
                     // Heading detection via style
                     if heading1_re.is_match(para_xml) {
@@ -596,6 +603,9 @@ impl Converter {
                         format!("## {}\n\n", formatted.trim())
                     } else if heading3_re.is_match(para_xml) {
                         format!("### {}\n\n", formatted.trim())
+                    } else if is_code_style {
+                        // Code block: wrap in triple backticks
+                        format!("```\n{}\n```\n\n", formatted.trim())
                     } else {
                         // Plain paragraph
                         let mut para_out = formatted.trim().to_string();
