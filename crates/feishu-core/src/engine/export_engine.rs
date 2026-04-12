@@ -424,28 +424,13 @@ impl ExportEngine {
 
         // Step 3: File doesn't exist, proceed with download
         let (response, file_ext_from_title): (reqwest::Response, Option<String>) = if node.obj_type == "file" {
-            // For file type: try direct download first, fall back to export API if it fails
-            let direct_download_result = Self::try_direct_download(&node, client, token, &expected_ext).await;
-
-            if let Ok(resp) = direct_download_result {
-                (resp, Some(expected_ext.clone()))
-            } else {
-                // Fallback: try using export API (works for uploaded files like xlsx/docx)
-                // Use obj_type from node info if available, otherwise try "sheet" for xlsx files
-                let fallback_format = if expected_ext == "xlsx" {
-                    ExportFormat::Xlsx
-                } else if expected_ext == "docx" {
-                    ExportFormat::Docx
-                } else {
-                    ExportFormat::Pdf
-                };
-
-                println!("    ⚠️ 直接下载失败，尝试导出 API (ext={})...", expected_ext);
-                let resp = client
-                    .export_document(token, &node.obj_token, &node.obj_type, fallback_format)
-                    .await?;
-                (resp, None)
-            }
+            // For file type: use the file download API directly
+            println!("    📤 使用文件下载 API...");
+            let resp = client
+                .download_file(token, &node.obj_token)
+                .await?;
+            // Extract actual extension from response header for file types too
+            (resp, None) // Don't use expected_ext, let response header determine it
         } else {
             // For docx/doc/sheet/bitable: use export API
             let resolved_format = Self::resolve_format(node, format);
@@ -587,70 +572,6 @@ impl ExportEngine {
             }
         }
         result
-    }
-
-    /// Try direct download of a file node (fallback for export API)
-    async fn try_direct_download(
-        node: &Node,
-        client: &FeishuClient,
-        token: &str,
-        _expected_ext: &str,
-    ) -> Result<reqwest::Response> {
-        // For file type: get node info first to find the download link
-        let node_info = match client.get_node_info(token, &node.node_token).await {
-            Ok(info) => info,
-            Err(e) => {
-                // If get_node_info fails (e.g., JSON decode error from API), return the error
-                // so we can fall back to export API
-                return Err(e);
-            }
-        };
-
-        // Download the file directly using the link
-        let download_url = if node_info.link.is_empty() {
-            return Err(Error::ConversionError(format!(
-                "File has no download link: {} (obj_type={})",
-                node.title, node_info.obj_type
-            )));
-        } else {
-            node_info.link
-        };
-
-        // Make download request (don't follow redirects automatically to avoid HTML responses)
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::none()) // Don't follow redirects to avoid HTML error pages
-            .build()
-            .map_err(Error::NetworkError)?;
-
-        let resp = http.get(&download_url)
-            .send()
-            .await
-            .map_err(Error::NetworkError)?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            // If redirect happened (3xx), try following it once to get the actual file
-            if status.is_redirection() {
-                if let Some(location) = resp.headers().get("location") {
-                    let redirect_url = location.to_str().unwrap_or_default();
-                    println!("    → 重定向到: {}", &redirect_url[..redirect_url.len().min(80)]);
-                    let resp2 = http.get(redirect_url)
-                        .send()
-                        .await
-                        .map_err(Error::NetworkError)?;
-                    if resp2.status().is_success() {
-                        return Ok(resp2);
-                    }
-                }
-            }
-            return Err(Error::ApiError {
-                code: status.as_u16() as i32,
-                msg: format!("download failed with status: {} (url: {})", status, download_url),
-            });
-        }
-
-        Ok(resp)
     }
 
     /// Resolve the format for API call: Auto → node type default, Docx → Xlsx for sheets

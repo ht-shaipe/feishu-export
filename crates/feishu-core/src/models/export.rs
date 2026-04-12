@@ -237,6 +237,7 @@ pub struct CreateExportTaskData {
 #[derive(Debug, Deserialize)]
 pub struct ExportTaskStatusResponse {
     pub code: i32,
+    pub msg: String,
     pub data: ExportTaskStatusData,
 }
 

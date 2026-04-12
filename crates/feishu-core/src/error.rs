@@ -77,8 +77,8 @@ impl FeishuCoreError {
     pub fn from_api_response(code: i32, msg: String) -> Self {
         match code {
             99991663 => FeishuCoreError::TokenExpired,
-            1310006 => FeishuCoreError::PermissionDenied { node: msg },
-            1310007 => FeishuCoreError::ExportTimeout { token: msg },
+            1310006 => FeishuCoreError::PermissionDenied { node: msg.clone() },
+            1310007 => FeishuCoreError::ExportTimeout { token: msg.clone() },
             1069918 => FeishuCoreError::FileExtensionMismatch { doc_type: msg },
             1069914 => FeishuCoreError::FileTokenInvalid { token: msg },
             _ => FeishuCoreError::ApiError { code, msg },

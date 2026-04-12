@@ -21,6 +21,9 @@ Cargo.lock
 *.swp
 *.swo
 
+# dirs
+output/
+
 # Coverage
 coverage/
 htmlcov/

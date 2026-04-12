@@ -266,9 +266,6 @@ impl FeishuClient {
     pub async fn create_export_task(&self, token: &str, obj_token: &str, obj_type: &str, format: ExportFormat) -> Result<String> {
         // Check if the document type supports export
         match obj_type {
-            "file" => {
-                return Err(Error::UnsupportedType { doc_type: format!("file (direct download): {}", obj_token) });
-            }
             "mindnote" | "slides" => {
                 return Err(Error::UnsupportedType { doc_type: obj_type.to_string() });
             }
@@ -306,10 +303,13 @@ impl FeishuClient {
     }
 
     /// Poll export task status until complete, return file_token
-    pub async fn poll_export_task(&self, token: &str, ticket: &str, obj_token: &str) -> Result<String> {
+    pub async fn poll_export_task(&self, token: &str, ticket: &str, obj_token: &str, obj_type: &str) -> Result<String> {
         let mut attempts = 0;
-        let max_attempts = 30;
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await; // initial wait
+        let max_attempts = 60; // bitable/sheet 最多等待 10 分钟
+        let initial_delay = 5; // 初始等待 5 秒
+        let delay = 5; // bitable/sheet 固定 5 秒间隔
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(initial_delay)).await;
 
         loop {
             attempts += 1;
@@ -318,38 +318,66 @@ impl FeishuClient {
                 ticket, obj_token
             );
 
-            println!("  🔄 检查导出任务状态 (尝试 {}/{})...", attempts, max_attempts);
+            // 每 10 次打印一次状态
+            if attempts == 1 || attempts % 10 == 0 {
+                println!("  🔄 检查导出任务状态 (尝试 {}/{})...", attempts, max_attempts);
+            }
             let resp = self.get(&url, token).await?;
             let data: ExportTaskStatusResponse = resp.json().await?;
 
             if data.code != 0 {
-                let err = Error::from_api_response(data.code, format!("poll_export_task failed for ticket {}", ticket));
-                println!("  🚨 错误转换: code={}, type={:?}", data.code, err);
+                let err = Error::from_api_response(data.code, format!("poll_export_task failed for ticket {} - {}", ticket, data.msg));
+                println!("  🚨 错误: code={}, msg={}", data.code, data.msg);
                 return Err(err);
             }
 
             let is_complete = data.data.result.extra.is_complete == "true";
             let file_token = data.data.result.file_token.clone();
+            let file_extension = data.data.result.file_extension.clone();
+            let file_name = data.data.result.file_name.clone();
 
-            println!("    - 完成状态: {}", is_complete);
-            println!("    - 文件 token: '{}'", file_token);
-            println!("    - 扩展名: {}", data.data.result.file_extension);
-            println!("    - 文件名: {}", data.data.result.file_name);
+            if attempts == 1 || attempts % 10 == 0 {
+                println!("    - 完成状态: {}", is_complete);
+                println!("    - 文件 token: '{}'", file_token);
+                println!("    - 扩展名: {}", file_extension);
+                println!("    - 文件名: {}", file_name);
+            }
 
             if is_complete {
                 if file_token.is_empty() {
                     println!("  ⚠️ 任务已完成但文件 token 为空");
                     return Err(Error::ExportTimeout { token: obj_token.to_string() });
                 }
+                println!("  ✅ 导出任务完成！");
                 return Ok(file_token);
             }
 
+            // 如果超过 10 次还是不完成，给用户更明确的提示
+            if attempts == 20 && !is_complete {
+                println!("  ⚠️ 导出任务处理时间较长...");
+                println!("  📊 这可能是因为：");
+                println!("     1. {} 文档包含大量数据", if obj_type == "bitable" { "多维表格" } else if obj_type == "sheet" { "电子表格" } else { "文档" });
+                println!("     2. 文档结构比较复杂");
+                println!("     3. 飞书服务器负载较高");
+                println!("  💡 建议：");
+                println!("     - 继续等待（最多还有 {} 分钟）", (max_attempts - attempts) * delay / 60);
+                println!("     - 或者稍后使用 --resume 参数续导");
+            }
+
             if attempts >= max_attempts {
+                println!("  🚨 导出任务超时（等待了 {} 分钟）", max_attempts * delay / 60);
+                println!("  💡 这可能是因为：");
+                println!("     1. {} 文档过大，无法导出", if obj_type == "bitable" { "多维表格" } else if obj_type == "sheet" { "电子表格" } else { "文档" });
+                println!("     2. {} 文档包含不兼容的内容", if obj_type == "bitable" { "多维表格" } else if obj_type == "sheet" { "电子表格" } else { "文档" });
+                println!("     3. 飞书服务器端处理失败");
+                println!("  💡 建议：");
+                println!("     - 跳过此文档，继续导出其他文档");
+                println!("     - 在飞书网页中手动导出此文档");
+                println!("     - 联系飞书技术支持");
                 return Err(Error::ExportTimeout { token: obj_token.to_string() });
             }
 
-            let delay = 2u64.pow(attempts.min(5)) * 1000;
-            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
         }
     }
 
@@ -372,6 +400,30 @@ impl FeishuClient {
                 msg: format!("download failed ({}): {}", status, &body[..body.len().min(300)]),
             };
             println!("  🚨 下载错误: {:?}", api_error);
+            return Err(api_error);
+        }
+        Ok(resp)
+    }
+
+    /// Download a file (obj_type="file") by file_token
+    pub async fn download_file(&self, token: &str, file_token: &str) -> Result<reqwest::Response> {
+        let url = format!(
+            "{}/open-apis/drive/v1/files/{}/download",
+            self.base_url, file_token
+        );
+
+        let mut h = HeaderMap::new();
+        h.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+
+        let resp = self.http.get(&url).headers(h).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let api_error = Error::ApiError {
+                code: status.as_u16() as i32,
+                msg: format!("file download failed ({}): {}", status, &body[..body.len().min(300)]),
+            };
+            println!("  🚨 文件下载错误: {:?}", api_error);
             return Err(api_error);
         }
         Ok(resp)
@@ -421,7 +473,7 @@ impl FeishuClient {
         format: ExportFormat,
     ) -> Result<reqwest::Response> {
         let ticket = self.create_export_task(token, obj_token, obj_type, format).await?;
-        let file_token = self.poll_export_task(token, &ticket, obj_token).await?;
+        let file_token = self.poll_export_task(token, &ticket, obj_token, obj_type).await?;
         self.download_export_file(token, &file_token).await
     }
 }
