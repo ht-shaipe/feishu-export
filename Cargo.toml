@@ -1,0 +1,62 @@
+[package]
+name = "feishu-export"
+version = "0.1.0"
+edition = "2021"
+authors = ["Feishu Export Team"]
+description = "飞书知识库文档批量导出 CLI 工具"
+license = "MIT"
+repository = "https://github.com/xxx/feishu-export"
+keywords = ["feishu", "lark", "export", "cli", "tool"]
+rust-version = "1.70"
+
+[dependencies]
+# CLI 框架
+clap = { version = "4.4", features = ["derive", "env"] }
+console = "0.15"
+colored = "2.1"
+indicatif = { version = "0.17", features = ["tokio"] }
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+
+# HTTP 客户端
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# 配置文件
+toml = "0.8"
+figment = { version = "0.10", features = ["toml"] }
+
+# 工具库
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+thiserror = "1"
+anyhow = "1"
+url = "2"
+base64 = "0.22"
+
+# zip 打包
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# docx → md 转换
+mammoth = "1"
+
+# 缓存
+glob = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"
+wiremock = "0.6"
+tempfile = "3"
+serial_test = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
