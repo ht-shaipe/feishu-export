@@ -159,6 +159,8 @@ impl Converter {
         let italic_re = Regex::new(r"<w:i[^/]*/>").unwrap();
         // Strike: <w:strike/> or <w:dstrike/>
         let strike_re = Regex::new(r"<w:(?:d?)strike[^/]*/>").unwrap();
+        // Run block: <w:r ...>...</w:r>
+        let run_re = Regex::new(r"<w:r\b[^>]*>(.*?)</w:r>").unwrap();
 
         let mut out = String::new();
         let mut seen_para_start = false;
@@ -186,26 +188,28 @@ impl Converter {
                 .unwrap_or(para_slice.len());
             let para_xml = &para_slice[..para_end];
 
-            // Extract all <w:t> texts
+            // Extract runs with per-run formatting
             let mut para_parts: Vec<String> = Vec::new();
-            for cap in text_re.captures_iter(para_xml) {
-                if let Some(text) = cap.get(1) {
-                    let raw = text.as_str().trim();
-                    if !raw.is_empty() {
-                        let mut t = raw.to_string();
+            for run_cap in run_re.captures_iter(para_xml) {
+                let run_xml = run_cap.get(1).map(|m| m.as_str()).unwrap_or("");
 
-                        if strike_re.is_match(para_xml) {
-                            t = format!("~~{}~~", t);
-                        }
-                        if bold_re.is_match(para_xml) {
-                            t = format!("**{}**", t);
-                        }
-                        if italic_re.is_match(para_xml) {
-                            t = format!("_{}_", t);
-                        }
+                // Check run-level formatting (bold/italic/strike within this run only)
+                let is_bold = bold_re.is_match(run_xml);
+                let is_italic = italic_re.is_match(run_xml);
+                let is_strike = strike_re.is_match(run_xml);
 
-                        para_parts.push(t);
-                    }
+                // Extract text from this run
+                let run_texts: Vec<&str> = text_re.captures_iter(run_xml)
+                    .filter_map(|c| c.get(1).map(|m| m.as_str().trim()))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                for raw in run_texts {
+                    let mut t = raw.to_string();
+                    if is_strike { t = format!("~~{}~~", t); }
+                    if is_bold   { t = format!("**{}**", t); }
+                    if is_italic { t = format!("_{}_", t); }
+                    para_parts.push(t);
                 }
             }
 

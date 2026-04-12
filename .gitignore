@@ -25,3 +25,4 @@
 # 导出临时文件
 exports/
 *.zip
+*.lock
