@@ -1,32 +1,33 @@
-(SKILL.md is a source file, so no changes needed to .gitignore)
+```
+# Build artifacts
+target/
 
-# Rust                                                                                                                                                                     
-/target/                                                                                                                                                                   
-**/*.rs.bk                                                                                                                                                          
+# Dependencies
 Cargo.lock
-**/*.lock                                                                                                                                                             
-                                    
-# IDE                                                                                                                                                               
-.idea/                                                                                                                                                              
-.vscode/                                                                                                                                                            
-*.swp                                                                                                                                                               
-*.swo                                                                                                                                                               
-*~                                                                                                                                                                  
-.DS_Store                                                                                                                                                                  
-                                                                                                                                                                    
-# Build                                                                                                                                                                    
-dist/                                                                                                                                                               
-build/                                                                                                                                                              
-                                                                                                                                                                    
-# Logs                                                                                                                                                              
-*.log                                                                                                                                                               
-                                                                                                                                                                    
-# Environment                                                                                                                                                       
-.env                                                                                                                                                                
-.env.local                                                                                                                                                          
-.env.*.local                                                                                                                                                        
-                                                                                                                                                                    
-# Temporary files                                                                                                                                                   
-tmp/                                                                                                                                                                
-temp/                                                                                                                                                               
-*.tmp  
+**/vendor/
+**/deps/
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# MyPy
+.mypy_cache/
+```
+
