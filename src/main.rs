@@ -65,12 +65,12 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// 设置应用凭证
+    /// 设置应用凭证（快捷方式：feishu-export config set --app-id X --app-secret X）
     Set {
         /// App ID
         #[arg(long)]
-        app_id: String,
-        /// App Secret
+        app_id: Option<String>,
+        /// App Secret（不传则交互式输入，隐藏回显）
         #[arg(long)]
         app_secret: Option<String>,
     },
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Config { action } => match action {
             ConfigAction::Set { app_id, app_secret } => {
-                cmd::ConfigCommand::new()?.set(&app_id, app_secret)?;
+                cmd::ConfigCommand::new()?.set(app_id, app_secret)?;
             }
             ConfigAction::Show => {
                 cmd::ConfigCommand::new()?.show()?;
