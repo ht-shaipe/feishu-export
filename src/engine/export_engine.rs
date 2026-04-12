@@ -148,6 +148,16 @@ impl ExportEngine {
                     }
                     Err(e) => {
                         pb_clone.inc(1);
+                        let err_msg = e.to_string();
+                        // 只对前 3 个失败打印详细错误
+                        let is_first_failure = {
+                            let count = prog.failed + prog.completed;
+                            count < 3
+                        };
+                        if is_first_failure {
+                            eprintln!("[ERR] ❌ {}: {}", node.title, err_msg);
+                            eprintln!("[ERR]    obj_token={} obj_type={}", node.obj_token, node.obj_type);
+                        }
                         if e.is_retryable() {
                             pb_clone.set_message(format!("⚠️ {} (重试)", node.title));
                         } else {

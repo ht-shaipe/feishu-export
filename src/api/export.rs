@@ -35,15 +35,23 @@ impl FeishuClient {
             "file_extension": format.api_extension(),
         });
 
+        eprintln!("[API] POST /open-apis/drive/v1/export_tasks token={} type={}", obj_token, doc_type);
         let response = self
             .post("/open-apis/drive/v1/export_tasks", access_token, body)
             .await?;
 
-        let data: CreateExportTaskResponse = response.json().await?;
+        let raw_text = response.text().await?;
+        eprintln!("[API] Response: {}", raw_text.chars().take(200).collect::<String>());
+
+        let data: CreateExportTaskResponse = serde_json::from_str(&raw_text).map_err(|e| {
+            eprintln!("[API] JSON parse error: {}", e);
+            FeishuError::ApiError { code: -1, msg: format!("JSON parse error: {} | raw: {}", e, &raw_text.chars().take(100).collect::<String>()) }
+        })?;
+
         if data.code != 0 {
             return Err(FeishuError::from_api_response(
                 data.code,
-                format!("Failed to create export task for token {}", obj_token),
+                format!("Failed to create export task for token {}: {}", obj_token, raw_text),
             ));
         }
 
@@ -62,7 +70,11 @@ impl FeishuClient {
             ticket, obj_token
         );
         let response = self.get(&url, access_token).await?;
-        let data: ExportTaskStatusResponse = response.json().await?;
+        let raw_text = response.text().await?;
+        eprintln!("[API] Poll response: {}", raw_text.chars().take(200).collect::<String>());
+        let data: ExportTaskStatusResponse = serde_json::from_str(&raw_text).map_err(|e| {
+            FeishuError::ApiError { code: -1, msg: format!("Poll JSON parse error: {} | raw: {}", e, &raw_text.chars().take(100).collect::<String>()) }
+        })?;
 
         if data.code != 0 {
             return Err(FeishuError::from_api_response(
@@ -89,6 +101,7 @@ impl FeishuClient {
 
         loop {
             attempts += 1;
+            eprintln!("[API] Poll attempt {}/{} for ticket={} token={}", attempts, max_attempts, ticket, obj_token);
             let status = self
                 .get_export_task_status(access_token, ticket, obj_token)
                 .await?;
@@ -167,6 +180,7 @@ impl FeishuClient {
 
         // Step 3: 下载文件
         let response = self.download_export_file(access_token, &file_token).await?;
+        eprintln!("[API] Download response status: {:?}", response.status());
         Ok(response)
     }
 }
