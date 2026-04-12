@@ -9,15 +9,11 @@ use walkdir::WalkDir;
 type CmdResult = std::result::Result<(), doc_converter::Error>;
 
 /// 文件或目录转 Markdown
-pub struct ConvertCommand {
-    converter: Converter,
-}
+pub struct ConvertCommand;
 
 impl ConvertCommand {
     pub fn new() -> Self {
-        Self {
-            converter: Converter::new(),
-        }
+        Self
     }
 
     /// Convert a single file or all .docx files under a directory.
@@ -25,13 +21,14 @@ impl ConvertCommand {
         &self,
         input: &Path,
         output: Option<&Path>,
+        output_images: Option<&Path>,
         recursive: bool,
         dry_run: bool,
     ) -> CmdResult {
         if input.is_file() {
-            self.convert_file(input, output, dry_run)
+            self.convert_file(input, output, output_images, dry_run)
         } else if input.is_dir() {
-            self.convert_dir(input, recursive, dry_run)
+            self.convert_dir(input, output_images, recursive, dry_run)
         } else {
             Err(doc_converter::Error::UnsupportedExtension(
                 input.to_string_lossy().into_owned(),
@@ -44,6 +41,7 @@ impl ConvertCommand {
         &self,
         input: &Path,
         output: Option<&Path>,
+        output_images: Option<&Path>,
         dry_run: bool,
     ) -> CmdResult {
         let input = input.to_path_buf();
@@ -59,6 +57,11 @@ impl ConvertCommand {
                 input.parent().unwrap_or(Path::new(".")).join(&md_name)
             });
 
+        // When output_images is specified, images go to output_path.parent() / output_images
+        let images_dir: Option<PathBuf> = output_images.map(|rel| {
+            output_path.parent().unwrap_or(Path::new(".")).join(rel)
+        });
+
         if dry_run {
             println!(
                 "{} {} → {}",
@@ -69,7 +72,17 @@ impl ConvertCommand {
             return Ok(());
         }
 
-        let md = self.converter.convert_file(&input)?;
+        // Build converter with optional image export directory
+        let converter = match &images_dir {
+            Some(dir) => {
+                std::fs::create_dir_all(dir)
+                    .map_err(doc_converter::Error::OpenFile)?;
+                Converter::new().output_images_dir(dir.clone())
+            }
+            None => Converter::new(),
+        };
+
+        let md = converter.convert_file(&input)?;
         std::fs::write(&output_path, &md)
             .map_err(doc_converter::Error::OpenFile)?;
 
@@ -78,7 +91,13 @@ impl ConvertCommand {
     }
 
     /// Recursively convert all .docx files in a directory.
-    fn convert_dir(&self, dir: &Path, recursive: bool, dry_run: bool) -> CmdResult {
+    fn convert_dir(
+        &self,
+        dir: &Path,
+        output_images: Option<&Path>,
+        recursive: bool,
+        dry_run: bool,
+    ) -> CmdResult {
         let depth = if recursive { usize::MAX } else { 1 };
 
         let entries: Vec<PathBuf> = WalkDir::new(dir)
@@ -121,7 +140,7 @@ impl ConvertCommand {
 
         let mut ok_count: usize = 0;
         for path in &unique {
-            match self.convert_file(path, None, dry_run) {
+            match self.convert_file(path, None, output_images, dry_run) {
                 Ok(_) => ok_count += 1,
                 Err(e) => {
                     println!("{} {}", "✗".red(), path.display());

@@ -62,6 +62,13 @@ feishu-export export <space_id> --output ~/exports --concurrency 8
 
 # 断点续导
 feishu-export export <space_id> --resume
+
+feishu-export convert file.docx                   # → file.md
+feishu-export convert file.docx -o out.md          # 指定输出
+feishu-export convert ./docs                       # 批量
+feishu-export convert ./docs -r                    # 含子目录
+feishu-export convert ./docs --dry-run             # 先预览
+
 ```
 
 ## 前置条件
@@ -73,15 +80,15 @@ feishu-export export <space_id> --resume
 
 ## 支持的文档类型
 
-| 飞书文档类型 | obj_type | 可导出格式 |
-|-------------|----------|-----------|
-| 新版文档 | docx | docx, pdf, md |
-| 旧版文档 | doc | docx, pdf, md |
-| 电子表格 | sheet | xlsx, csv |
-| 多维表格 | bitable | xlsx, csv |
-| 文件 | file | 原样下载 |
-| 思维导图 | mindnote | ⚠️ 暂不支持 API 导出 |
-| 幻灯片 | slides | ⚠️ 暂不支持 API 导出 |
+| 飞书文档类型 | obj_type | 可导出格式          |
+| ------------ | -------- | ------------------- |
+| 新版文档     | docx     | docx, pdf, md       |
+| 旧版文档     | doc      | docx, pdf, md       |
+| 电子表格     | sheet    | xlsx, csv           |
+| 多维表格     | bitable  | xlsx, csv           |
+| 文件         | file     | 原样下载            |
+| 思维导图     | mindnote | ⚠️ 暂不支持 API 导出 |
+| 幻灯片       | slides   | ⚠️ 暂不支持 API 导出 |
 
 ## License
 

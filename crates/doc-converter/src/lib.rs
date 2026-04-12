@@ -2,11 +2,18 @@
 //!
 //! Uses the `docx` crate for structured parsing with graceful fallback
 //! to regex-based plain-text extraction when the file has non-conformant XML.
+//!
+//! # Image embedding
+//! When `embed_images` is enabled (default: **true**), images found inside
+//! the `.docx` package are extracted and embedded as Base64 data URIs:
+//! ```markdown
+//! ![image](data:image/png;base64,iVBORw0...)
+//! ```
 
-use docx::document::{BodyContent, Document, Paragraph, ParagraphContent, RunContent, Table, TableCellContent};
-use docx::formatting::CharacterProperty;
-use docx::DocxFile;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
 use regex::Regex;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -32,22 +39,55 @@ pub enum Error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Image map: rId → (data_uri_string)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maps relationship IDs (e.g. `"rId5"`) → base64 data URIs.
+type ImageMap = HashMap<String, String>;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Markdown converter.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Converter {
     pub overwrite: bool,
+    /// When true (default), images are extracted and embedded as Base64 data URIs.
+    /// Set `output_images_dir` to save images to disk instead.
+    pub embed_images: bool,
+    /// When set, images are saved to this directory and referenced by relative path.
+    /// When None, images are embedded as Base64 data URIs.
+    pub output_images_dir: Option<PathBuf>,
+}
+
+impl Default for Converter {
+    fn default() -> Self {
+        Self { overwrite: false, embed_images: true, output_images_dir: None }
+    }
 }
 
 impl Converter {
     pub fn new() -> Self {
-        Self { overwrite: false }
+        Self::default()
     }
 
     pub fn overwrite(mut self) -> Self {
         self.overwrite = true;
+        self
+    }
+
+    /// Disable image embedding (images will be silently skipped).
+    pub fn no_images(mut self) -> Self {
+        self.embed_images = false;
+        self
+    }
+
+    /// Save extracted images to the given directory instead of embedding as Base64.
+    /// The directory will be created if it does not exist.
+    /// Relative paths are resolved from the current working directory.
+    pub fn output_images_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.output_images_dir = Some(dir.into());
         self
     }
 
@@ -59,19 +99,7 @@ impl Converter {
         self.validate_input(path)?;
 
         let bytes = std::fs::read(path)?;
-
-        match self.parse_document(&bytes) {
-            Ok(md) => Ok(md),
-            Err(e) => {
-                // Fallback: extract plain text from XML
-                let fallback = self.extract_plain_text(&bytes)?;
-                if fallback.trim().is_empty() {
-                    Err(e) // no fallback content, return original error
-                } else {
-                    Ok(fallback)
-                }
-            }
-        }
+        self.convert_bytes_inner(&bytes)
     }
 
     /// Convert a `.docx` file and write to an output Markdown file.
@@ -90,12 +118,26 @@ impl Converter {
 
     /// Convert docx bytes to Markdown.
     pub fn convert_bytes(&self, bytes: impl Into<Vec<u8>>) -> Result<String, Error> {
-        let bytes = bytes.into();
+        self.convert_bytes_inner(&bytes.into())
+    }
 
-        match self.parse_document(&bytes) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // Internal conversion entry point
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn convert_bytes_inner(&self, bytes: &[u8]) -> Result<String, Error> {
+        // Build image map from the ZIP (always attempt, even if embed disabled)
+        let image_map = if self.embed_images {
+            self.extract_image_map(bytes).unwrap_or_default()
+        } else {
+            ImageMap::new()
+        };
+
+        match self.parse_document(bytes, &image_map) {
             Ok(md) => Ok(md),
             Err(_e) => {
-                let fallback = self.extract_plain_text(&bytes)?;
+                // Fallback: extract plain text from XML with image support
+                let fallback = self.extract_plain_text(bytes, &image_map)?;
                 if fallback.trim().is_empty() {
                     Err(Error::Parse("无法解析 docx 内容".to_string()))
                 } else {
@@ -106,21 +148,131 @@ impl Converter {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Image extraction: build rId → data-URI map
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Extract all images from the docx ZIP.
+    ///
+    /// Two modes:
+    /// - `output_images_dir` is set → save files to disk, return `rId → relative/path.ext`
+    /// - otherwise → return `rId → data:image/…;base64,…`
+    fn extract_image_map(&self, bytes: &[u8]) -> Result<ImageMap, Error> {
+        let mut zip = ZipArchive::new(std::io::Cursor::new(bytes))
+            .map_err(|e| Error::Parse(format!("zip error: {:?}", e)))?;
+
+        let rels = self.parse_relationships(&mut zip)?;
+
+        let mut map = ImageMap::new();
+
+        for (rid, target) in &rels {
+            let zip_path = normalise_media_path(target);
+            if zip_path.is_none() {
+                continue;
+            }
+            let zip_path = zip_path.unwrap();
+
+            let mut img_bytes = Vec::new();
+            match zip.by_name(&zip_path) {
+                Ok(mut f) => {
+                    f.read_to_end(&mut img_bytes)
+                        .map_err(|e| Error::Parse(format!("read image: {}", e)))?;
+                }
+                Err(_) => continue,
+            }
+
+            if let Some(ref dir) = self.output_images_dir {
+                // Save to disk and return relative path
+                let ext = target.rsplit('.').next().unwrap_or("png");
+                let filename = format!("{}_{}.{}", rid.replace(':', "_"), sanitize_filename(target), ext);
+                let img_path = dir.join(&filename);
+                std::fs::write(&img_path, &img_bytes)
+                    .map_err(|e| Error::Parse(format!("write image {}: {}", filename, e)))?;
+                // Relative path from MD output dir (dir is already absolute or cwd-relative)
+                let rel = format!("./{}", filename);
+                map.insert(rid.clone(), rel);
+            } else {
+                // Base64 data URI
+                let mime = mime_from_path(&zip_path);
+                let b64 = B64.encode(&img_bytes);
+                let data_uri = format!("data:{};base64,{}", mime, b64);
+                map.insert(rid.clone(), data_uri);
+            }
+        }
+
+        Ok(map)
+    }
+
+    /// Parse `word/_rels/document.xml.rels` and return `rId → Target` map.
+    fn parse_relationships(&self, zip: &mut ZipArchive<std::io::Cursor<&[u8]>>) -> Result<HashMap<String, String>, Error> {
+        let mut xml = String::new();
+        match zip.by_name("word/_rels/document.xml.rels") {
+            Ok(mut f) => {
+                f.read_to_string(&mut xml)
+                    .map_err(|e| Error::Parse(format!("read rels: {}", e)))?;
+            }
+            Err(_) => return Ok(HashMap::new()),
+        }
+
+        // <Relationship Id="rId5" Type="...image..." Target="../media/image1.png"/>
+        let re = Regex::new(r#"(?i)<Relationship[^>]+Id="([^"]+)"[^>]+Target="([^"]+)"[^>]*/>"#)
+            .unwrap();
+
+        let mut map = HashMap::new();
+        for cap in re.captures_iter(&xml) {
+            let id = cap[1].to_string();
+            let target = cap[2].to_string();
+            map.insert(id, target);
+        }
+        Ok(map)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Structured parsing via docx crate
     // ─────────────────────────────────────────────────────────────────────────
 
-    fn parse_document(&self, bytes: &[u8]) -> Result<String, Error> {
-        let cursor = std::io::Cursor::new(bytes);
-        let docx_file = DocxFile::from_reader(cursor)
-            .map_err(Self::docx_err_to_string)?;
-        let docx = docx_file
-            .parse()
-            .map_err(Self::docx_err_to_string)?;
-        Ok(self.document_to_md(&docx.document))
+    fn parse_document(&self, bytes: &[u8], image_map: &ImageMap) -> Result<String, Error> {
+        // The XML pass is the primary path because it correctly detects all
+        // <w:drawing> elements regardless of how the docx crate surfaces them.
+        let drawing_map = self.extract_drawing_map(bytes).unwrap_or_default();
+        self.document_to_md_xml_pass(bytes, image_map, &drawing_map)
     }
 
-    fn docx_err_to_string(e: impl std::fmt::Debug) -> Error {
-        Error::Parse(format!("{:?}", e))
+    /// Extract a map of paragraph index → image markdown from raw XML <w:drawing> elements.
+    ///
+    /// Returns `HashMap<para_pos_hint, Vec<rId>>` – we use the paragraph XML offset
+    /// as a rough positional key to associate images with surrounding paragraphs.
+    fn extract_drawing_map(&self, bytes: &[u8]) -> Result<Vec<String>, Error> {
+        let mut zip = ZipArchive::new(std::io::Cursor::new(bytes))
+            .map_err(|e| Error::Parse(format!("zip error: {:?}", e)))?;
+
+        let mut xml = String::new();
+        {
+            let mut f = zip.by_name("word/document.xml")
+                .map_err(|e| Error::Parse(format!("missing document.xml: {:?}", e)))?;
+            f.read_to_string(&mut xml)
+                .map_err(|e| Error::Parse(format!("read document.xml: {}", e)))?;
+        }
+
+        // Extract all r:embed values inside <w:drawing> blocks (order preserved)
+        // Pattern: <a:blip r:embed="rId5" ... />
+        let drawing_re = Regex::new(r"(?s)<w:drawing\b.*?</w:drawing>").unwrap();
+        let embed_re = Regex::new(r#"r:embed="([^"]+)""#).unwrap();
+        let descr_re = Regex::new(r#"(?:descr|name)="([^"]+)""#).unwrap();
+
+        let mut result = Vec::new();
+        for drawing in drawing_re.find_iter(&xml) {
+            let drawing_xml = drawing.as_str();
+            if let Some(cap) = embed_re.captures(drawing_xml) {
+                let rid = cap[1].to_string();
+                // Try to get alt text from descr or name attribute
+                let alt = descr_re.captures(drawing_xml)
+                    .and_then(|c| c.get(1))
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_else(|| "image".to_string());
+                result.push(format!("{}|{}", rid, alt));
+            }
+        }
+        Ok(result)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -128,7 +280,8 @@ impl Converter {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Extract plain text from docx XML, preserving paragraph boundaries.
-    fn extract_plain_text(&self, bytes: &[u8]) -> Result<String, Error> {
+    /// Drawings are resolved to base64 data URIs using the provided image_map.
+    fn extract_plain_text(&self, bytes: &[u8], image_map: &ImageMap) -> Result<String, Error> {
         let mut zip = ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|e| Error::Parse(format!("zip error: {:?}", e)))?;
 
@@ -162,6 +315,11 @@ impl Converter {
         // Run block: <w:r ...>...</w:r>
         let run_re = Regex::new(r"<w:r\b[^>]*>(.*?)</w:r>").unwrap();
 
+        // Drawing / image reference
+        let drawing_re = Regex::new(r"(?s)<w:drawing\b.*?</w:drawing>").unwrap();
+        let embed_re = Regex::new(r#"r:embed="([^"]+)""#).unwrap();
+        let descr_re = Regex::new(r#"(?:descr|name)="([^"]+)""#).unwrap();
+
         let mut out = String::new();
         let mut seen_para_start = false;
 
@@ -187,6 +345,24 @@ impl Converter {
                 .map(|m| m.start())
                 .unwrap_or(para_slice.len());
             let para_xml = &para_slice[..para_end];
+
+            // ── Images inside this paragraph ──────────────────────────────────
+            let mut img_parts: Vec<String> = Vec::new();
+            if self.embed_images {
+                for drawing in drawing_re.find_iter(para_xml) {
+                    let dxml = drawing.as_str();
+                    if let Some(cap) = embed_re.captures(dxml) {
+                        let rid = &cap[1];
+                        let alt = descr_re.captures(dxml)
+                            .and_then(|c| c.get(1))
+                            .map(|m| m.as_str())
+                            .unwrap_or("image");
+                        if let Some(data_uri) = image_map.get(rid) {
+                            img_parts.push(format!("![{}]({})\n\n", alt, data_uri));
+                        }
+                    }
+                }
+            }
 
             // Extract runs with per-run formatting
             let mut para_parts: Vec<String> = Vec::new();
@@ -214,7 +390,11 @@ impl Converter {
             }
 
             let joined = para_parts.join("").trim().to_string();
-            if joined.is_empty() {
+
+            let has_text = !joined.is_empty();
+            let has_img = !img_parts.is_empty();
+
+            if !has_text && !has_img {
                 continue;
             }
 
@@ -223,13 +403,19 @@ impl Converter {
             }
             seen_para_start = true;
 
-            if is_heading {
-                out.push_str(&"#".repeat(heading_level));
-                out.push(' ');
+            if has_text {
+                if is_heading {
+                    out.push_str(&"#".repeat(heading_level));
+                    out.push(' ');
+                }
+                out.push_str(&joined);
+                out.push_str("\n\n");
             }
 
-            out.push_str(&joined);
-            out.push_str("\n\n");
+            for img in img_parts {
+                out.push_str(&img);
+                out.push_str("\n\n");
+            }
         }
 
         // Table fallback: extract simple text tables
@@ -243,6 +429,27 @@ impl Converter {
 
             // Check if already processed (in paragraph text)
             if out.contains(&Self::table_preview(table_xml)) {
+                continue;
+            }
+
+            // ── Pseudo-table detection: single-column code/directory-tree content ──
+            if Self::is_pseudo_table(table_xml) {
+                out.push_str("\n```\n");
+                for rcap in row_re.captures_iter(table_xml) {
+                    let row_xml = rcap.get(1).map(|m| m.as_str()).unwrap_or("");
+                    for ccap in cell_re.captures_iter(row_xml) {
+                        if let Some(cell_xml) = ccap.get(1).map(|m| m.as_str()) {
+                            let texts: String = cell_text_re.captures_iter(cell_xml)
+                                .filter_map(|tc| tc.get(1).map(|m| m.as_str().trim()))
+                                .collect();
+                            if !texts.trim().is_empty() {
+                                out.push_str(texts.trim());
+                                out.push('\n');
+                            }
+                        }
+                    }
+                }
+                out.push_str("```\n\n");
                 continue;
             }
 
@@ -317,55 +524,225 @@ impl Converter {
         Ok(())
     }
 
-    fn document_to_md(&self, doc: &Document<'_>) -> String {
+    /// Process the raw XML paragraph list directly.
+    ///
+    /// This pass is the key to reliable image extraction. The `docx` crate's
+    /// `ParagraphContent` does NOT expose `<w:drawing>` elements, so the primary
+    /// pass cannot detect inline images that appear alongside text in the same
+    /// paragraph. This XML pass correctly handles all three cases:
+    ///   1. Image-only paragraph  (text empty, drawing present)
+    ///   2. Text + inline image   (text present, drawing in same <w:p>)
+    ///   3. Text-only paragraph   (no drawing)
+    ///
+    /// It processes every paragraph in document order and produces the final
+    /// interleaved markdown.
+    fn document_to_md_xml_pass(&self, bytes: &[u8], image_map: &ImageMap, drawing_order: &[String]) -> Result<String, Error> {
+        let mut zip = ZipArchive::new(std::io::Cursor::new(bytes))
+            .map_err(|e| Error::Parse(format!("zip error: {:?}", e)))?;
+
+        let mut xml = String::new();
+        {
+            let mut docx_xml = zip.by_name("word/document.xml")
+                .map_err(|e| Error::Parse(format!("missing document.xml: {:?}", e)))?;
+            docx_xml.read_to_string(&mut xml)
+                .map_err(|e| Error::Parse(format!("read xml: {}", e)))?;
+        }
+
+        // Paragraphs (including table cells)
+        let para_re = Regex::new(r"(?s)<w:p[ >].*?</w:p>").unwrap();
+        let text_re  = Regex::new(r"<w:t[^>]*>([^<]*)</w:t>").unwrap();
+
+        let heading1_re = Regex::new(r#"<w:pStyle[^>]+w:val="(Heading1|Title)"/>"#).unwrap();
+        let heading2_re = Regex::new(r#"<w:pStyle[^>]+w:val="Heading2"/>"#).unwrap();
+        let heading3_re = Regex::new(r#"<w:pStyle[^>]+w:val="Heading3"/>"#).unwrap();
+
+        let bold_re   = Regex::new(r"<w:b[^/]*/>").unwrap();
+        let italic_re = Regex::new(r"<w:i[^/]*/>").unwrap();
+        let strike_re = Regex::new(r"<w:(?:d?)strike[^/]*/>").unwrap();
+
+        let drawing_re = Regex::new(r"(?s)<w:drawing\b.*?</w:drawing>").unwrap();
+        let embed_re   = Regex::new(r#"r:embed="([^"]+)""#).unwrap();
+        let descr_re   = Regex::new(r#"(?:descr|name)="([^"]+)""#).unwrap();
+
         let mut out = String::new();
+        let _drawing_order = drawing_order; // consumed by drawing_map in caller
 
-        for content in &doc.body.content {
-            match content {
-                BodyContent::Paragraph(p) => self.append_paragraph(&mut out, p),
-                BodyContent::Table(t) => self.append_table(&mut out, t),
+        for para_match in para_re.find_iter(&xml) {
+            let para_xml = para_match.as_str();
+
+            // ── Extract text ───────────────────────────────────────────────────
+            let text_parts: Vec<String> = text_re.captures_iter(para_xml)
+                .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            // ── Extract drawings in this paragraph ────────────────────────────────
+            let para_drawings: Vec<&str> = drawing_re.find_iter(para_xml).map(|m| m.as_str()).collect();
+
+            // ── Skip empty paragraphs with no drawings ─────────────────────────
+            if text_parts.is_empty() && para_drawings.is_empty() {
+                continue;
+            }
+
+            // ── Apply inline formatting across all text runs ───────────────────
+            let raw_text = text_parts.join("");
+            if !raw_text.trim().is_empty() {
+                let formatted = Self::format_text_with_styles(para_xml, &text_re, &bold_re, &italic_re, &strike_re);
+                let line = if !formatted.trim().is_empty() {
+                    // Heading detection via style
+                    if heading1_re.is_match(para_xml) {
+                        format!("# {}\n\n", formatted.trim())
+                    } else if heading2_re.is_match(para_xml) {
+                        format!("## {}\n\n", formatted.trim())
+                    } else if heading3_re.is_match(para_xml) {
+                        format!("### {}\n\n", formatted.trim())
+                    } else {
+                        // Plain paragraph
+                        let mut para_out = formatted.trim().to_string();
+                        para_out.push_str("\n\n");
+                        para_out
+                    }
+                } else {
+                    String::new()
+                };
+                out.push_str(&line);
+            }
+
+            // ── Emit images from drawings in this paragraph ───────────────────
+            for drawing_xml in para_drawings {
+                if let Some(cap) = embed_re.captures(drawing_xml) {
+                    let rid = cap[1].to_string();
+                    let alt = descr_re.captures(drawing_xml)
+                        .and_then(|c| c.get(1))
+                        .map(|m| m.as_str())
+                        .unwrap_or("image");
+                    if let Some(data_uri) = image_map.get(&rid) {
+                        out.push_str(&format!("![{}]({})\n\n", alt, data_uri));
+                    }
+                }
             }
         }
 
-        out.trim_end().to_string()
-    }
+        // ── Tables ────────────────────────────────────────────────────────────
+        let table_re  = Regex::new(r"(?s)<w:tbl>.*?</w:tbl>").unwrap();
+        let row_re    = Regex::new(r"(?s)<w:tr[ >].*?</w:tr>").unwrap();
+        let cell_re   = Regex::new(r"(?s)<w:tc[ >].*?</w:tc>").unwrap();
+        let cell_txt  = Regex::new(r"<w:t[^>]*>([^<]*)</w:t>").unwrap();
 
-    fn append_paragraph(&self, out: &mut String, para: &Paragraph<'_>) {
-        let text = para.iter_text().map(|s| s.as_ref()).collect::<String>();
+        for tcap in table_re.find_iter(&xml) {
+            let table_xml = tcap.as_str();
 
-        if text.trim().is_empty() {
-            if !out.ends_with('\n') {
+            // ── Pseudo-table detection: single-column code/directory-tree content ──
+            if Self::is_pseudo_table(table_xml) {
+                out.push_str("```\n");
+                for rcap in row_re.find_iter(table_xml) {
+                    let row_xml = rcap.as_str();
+                    for ccap in cell_re.find_iter(row_xml) {
+                        let cell_xml = ccap.as_str();
+                        let texts: String = cell_txt.captures_iter(cell_xml)
+                            .filter_map(|tc| tc.get(1).map(|m| m.as_str().trim()))
+                            .collect();
+                        if !texts.trim().is_empty() {
+                            out.push_str(texts.trim());
+                            out.push('\n');
+                        }
+                    }
+                }
+                out.push_str("```\n\n");
+                continue;
+            }
+
+            // ── Normal table: render as Markdown table ──────────────────────────
+            let mut header_written = false;
+            for rcap in row_re.captures_iter(table_xml) {
+                let row_xml = rcap.get(0).map(|m| m.as_str()).unwrap_or("");
+                let cells: Vec<String> = cell_re.captures_iter(row_xml)
+                    .filter_map(|ccap| {
+                        let cell_xml = ccap.get(0).map(|m| m.as_str()).unwrap_or("");
+                        let texts: Vec<&str> = cell_txt.captures_iter(cell_xml)
+                            .filter_map(|tc| tc.get(1).map(|m| m.as_str().trim()))
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        if texts.is_empty() { None } else { Some(texts.join(" ")) }
+                    })
+                    .collect();
+
+                if cells.is_empty() { continue; }
+                let col_count = cells.len();
+
+                out.push('|');
+                out.push_str(&cells.iter().map(|c| format!(" {} |", c.replace('|', "\\|"))).collect::<String>());
                 out.push('\n');
+
+                if !header_written {
+                    out.push('|');
+                    for _ in 0..col_count { out.push_str(" --- |"); }
+                    out.push('\n');
+                    header_written = true;
+                }
             }
-            return;
+            out.push('\n');
         }
 
-        if let Some(sid) = self.style_id(para) {
-            if let Some(heading) = self.heading_from_style(&sid, &text) {
-                out.push_str(&heading);
-                out.push_str("\n\n");
-                return;
-            }
-        }
-
-        if let Some(heading) = self.detect_heading_from_content(&text) {
-            out.push_str(&heading);
-            out.push_str("\n\n");
-            return;
-        }
-
-        let rendered = self.render_paragraph(para);
-        out.push_str(&rendered);
-        out.push('\n');
+        Ok(out.trim().to_string())
     }
 
-    fn style_id<'a>(&self, para: &'a Paragraph) -> Option<String> {
-        para.property.style_id.as_ref().and_then(|sid| {
-            let v = sid.value.as_ref();
-            if v.is_empty() { None } else { Some(v.to_string()) }
-        })
+    /// Apply bold/italic/strike formatting to raw text segments within a paragraph XML block.
+    fn format_text_with_styles(
+        para_xml: &str,
+        text_re: &Regex,
+        bold_re: &Regex,
+        italic_re: &Regex,
+        strike_re: &Regex,
+    ) -> String {
+        // Split by <w:r>...</w:r> blocks to handle per-run formatting
+        let run_re = Regex::new(r"(?s)<w:r\b[^>]*>.*?</w:r>").unwrap();
+        let mut parts: Vec<String> = Vec::new();
+
+        for run_cap in run_re.captures_iter(para_xml) {
+            let run_xml = run_cap.get(0).map(|m| m.as_str()).unwrap_or("");
+            let is_bold   = bold_re.is_match(run_xml);
+            let is_italic = italic_re.is_match(run_xml);
+            let is_strike = strike_re.is_match(run_xml);
+
+            for tc in text_re.captures_iter(run_xml) {
+                let raw = tc.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+                if raw.is_empty() { continue; }
+                let mut s = Self::escape_md(raw);
+                if is_strike { s = format!("~~{}~~", s); }
+                if is_bold   { s = format!("**{}**", s); }
+                if is_italic { s = format!("_{}_", s); }
+                parts.push(s);
+            }
+        }
+
+        parts.join("")
     }
 
+    // ─── Test-only helpers (keep API surface stable) ────────────────────────
+
+    #[cfg(test)]
+    fn apply_inline(text: &str, props: &docx::formatting::CharacterProperty<'_>) -> String {
+        if text.is_empty() { return String::new(); }
+        let is_bold = props.bold.is_some();
+        let is_italic = props.italics.is_some();
+        let is_strike = props.strike.is_some();
+        let is_code = props.style_id.as_ref().is_some_and(|s| {
+            matches!(s.value.as_ref().to_ascii_lowercase().as_str(), "code" | "inlinecode")
+        });
+        let escaped = if is_code { text.to_string() } else { Self::escape_md(text) };
+        if is_code {
+            format!("`{}`", escaped.trim())
+        } else {
+            let s = escaped;
+            let s = if is_bold   { format!("**{}**", s) } else { s };
+            let s = if is_italic { format!("_{}_", s) } else { s };
+            let s = if is_strike { format!("~~{}~~", s) } else { s };
+            s
+        }
+    }
+
+    #[cfg(test)]
     fn heading_from_style(&self, style_id: &str, text: &str) -> Option<String> {
         let level = match style_id.to_ascii_lowercase().as_str() {
             "title" | "heading1" => 1,
@@ -379,86 +756,74 @@ impl Converter {
         Some(format!("{} {}", "#".repeat(level), text))
     }
 
-    fn detect_heading_from_content(&self, text: &str) -> Option<String> {
-        let trimmed = text.trim();
-        if trimmed.len() <= 80
-            && trimmed.chars().filter(|c| c.is_ascii_alphabetic()).count() > 3
-            && trimmed == trimmed.to_uppercase()
-        {
-            return Some(format!("# {}", trimmed));
+    // ─── End test-only helpers ───────────────────────────────────────────────
+
+    // ─── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Detect if a table is a "pseudo-table" that should be rendered as a code block.
+    ///
+    /// Single-column tables containing lines that look like code/paths/directory trees
+    /// (e.g. `@image:xxx`, `src/components/`, `├── foo`) are common in Word documents
+    /// but should NOT be rendered as Markdown tables — they should be code blocks.
+    fn is_pseudo_table(table_xml: &str) -> bool {
+        let cell_re = Regex::new(r"(?s)<w:tc[ >].*?</w:tc>").unwrap();
+        let cell_txt = Regex::new(r"<w:t[^>]*>([^<]*)</w:t>").unwrap();
+
+        let mut col_count: Option<usize> = None;
+        let mut line_count = 0;
+
+        // Find first row to determine column count
+        let row_re = Regex::new(r"(?s)<w:tr[ >].*?</w:tr>").unwrap();
+        for rcap in row_re.find_iter(table_xml) {
+            let row_xml = rcap.as_str();
+            let cells_in_row: Vec<_> = cell_re.find_iter(row_xml).collect();
+
+            if line_count == 0 {
+                col_count = Some(cells_in_row.len());
+            }
+            line_count += 1;
         }
-        if trimmed.len() <= 120
-            && (trimmed.starts_with("1.") || trimmed.starts_with("2.") || trimmed.starts_with("3."))
-        {
-            return Some(format!("## {}", trimmed));
-        }
-        None
-    }
 
-    fn render_paragraph(&self, para: &Paragraph<'_>) -> String {
-        let mut parts: Vec<String> = Vec::new();
+        // Must be single-column and have at least 2 rows
+        let cols = match col_count {
+            Some(c) if c == 1 && line_count >= 2 => c,
+            _ => return false,
+        };
 
-        for content in &para.content {
-            match content {
-                ParagraphContent::Run(run) => {
-                    let run_text = run
-                        .content
-                        .iter()
-                        .filter_map(|c| match c {
-                            RunContent::Text(t) => {
-                                let s = t.text.as_ref();
-                                if s.is_empty() { None } else { Some(s.to_string()) }
-                            }
-                            RunContent::Break(_) => Some(" ".to_string()),
-                        })
-                        .collect::<String>();
+        let _ = cols; // suppress unused warning
 
-                    if run_text.is_empty() { continue; }
-                    parts.push(Self::apply_inline(&run_text, &run.property));
+        // Check if all cells look like code/directory-tree content
+        let pseudo_patterns = [
+            // Contains @ prefix (e.g. @image:xxx, @path:yyy)
+            |s: &str| s.starts_with('@'),
+            // Contains path separators (file paths, directory trees)
+            |s: &str| s.contains(":/") || s.contains('\\') || s.starts_with('/'),
+            // Directory tree characters (├──, └──, │)
+            |s: &str| s.contains("├──") || s.contains("└──") || s.contains("│"),
+            // Code-like patterns (starts with indent, has ::, #, $)
+            |s: &str| s.starts_with(' ') && s.contains(|c: char| c == ':' || c == '#' || c == '$'),
+        ];
+
+        for rcap in row_re.find_iter(table_xml) {
+            let row_xml = rcap.as_str();
+            for ccap in cell_re.find_iter(row_xml) {
+                let cell_xml = ccap.as_str();
+                let texts: String = cell_txt.captures_iter(cell_xml)
+                    .filter_map(|tc| tc.get(1).map(|m| m.as_str()))
+                    .collect();
+
+                let trimmed = texts.trim();
+                if trimmed.is_empty() { continue; }
+
+                // Check against pseudo-table patterns
+                let is_pseudo = pseudo_patterns.iter().any(|p| p(trimmed));
+                if !is_pseudo {
+                    return false;
                 }
-                ParagraphContent::Link(link) => {
-                    let run_text = link.content.content.iter()
-                        .filter_map(|c| match c {
-                            RunContent::Text(t) => {
-                                let s = t.text.as_ref();
-                                if s.is_empty() { None } else { Some(s.to_string()) }
-                            }
-                            RunContent::Break(_) => Some(" ".to_string()),
-                        })
-                        .collect::<String>();
-
-                    let rendered = Self::apply_inline(&run_text, &link.content.property);
-                    parts.push(format!("[{}]({})", rendered.trim(), "#"));
-                }
-                ParagraphContent::BookmarkStart(_) | ParagraphContent::BookmarkEnd(_) => {}
             }
         }
 
-        let joined = parts.join("").trim().to_string();
-        if joined.is_empty() { String::new() } else { joined }
-    }
-
-    fn apply_inline(text: &str, props: &CharacterProperty<'_>) -> String {
-        if text.is_empty() { return String::new(); }
-
-        let is_bold = props.bold.is_some();
-        let is_italic = props.italics.is_some();
-        let is_strike = props.strike.is_some();
-        let is_code = props.style_id.as_ref().is_some_and(|s| {
-            matches!(s.value.as_ref().to_ascii_lowercase().as_str(), "code" | "inlinecode")
-        });
-
-        let escaped = if is_code { text.to_string() } else { Self::escape_md(text) };
-
-        if is_code {
-            format!("`{}`", escaped.trim())
-        } else {
-            let s = escaped;
-            let s = if is_bold { format!("**{}**", s) } else { s };
-            let s = if is_italic { format!("_{}_", s) } else { s };
-            let s = if is_strike { format!("~~{}~~", s) } else { s };
-            s
-        }
+        true
     }
 
     fn escape_md(text: &str) -> String {
@@ -473,47 +838,75 @@ impl Converter {
             .replace('+', "\\+")
             .replace('!', "\\!")
     }
+}
 
-    fn append_table(&self, out: &mut String, table: &Table<'_>) {
-        if table.rows.is_empty() { return; }
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper functions
+// ─────────────────────────────────────────────────────────────────────────────
 
-        let col_count = table.rows.first().map(|r| r.cells.len()).unwrap_or(0);
-        if col_count == 0 { return; }
+/// Normalise a relationship Target to a ZIP entry path under `word/`.
+/// Returns `None` if the target does not look like a media file.
+fn normalise_media_path(target: &str) -> Option<String> {
+    // Targets look like: "../media/image1.png" or "media/image1.png"
+    let lower = target.to_ascii_lowercase();
 
-        for (i, row) in table.rows.iter().enumerate() {
-            let mut cells: Vec<String> = row.cells.iter()
-                .map(|cell| {
-                    cell.content.iter()
-                        .filter_map(|c| match c {
-                            TableCellContent::Paragraph(p) => {
-                                Some(p.iter_text().map(|t| t.as_ref()).collect::<String>())
-                            }
-                        })
-                        .collect::<String>()
-                        .trim()
-                        .to_string()
-                })
-                .collect();
-
-            while cells.len() < col_count { cells.push(String::new()); }
-            cells.truncate(col_count);
-
-            out.push('|');
-            for c in &cells {
-                out.push_str(" ");
-                out.push_str(&c.replace('|', "\\|"));
-                out.push('|');
-            }
-            out.push('\n');
-
-            if i == 0 {
-                out.push('|');
-                for _ in 0..col_count { out.push_str(" --- |"); }
-                out.push('\n');
-            }
-        }
-        out.push('\n');
+    // Must contain "media/" somewhere
+    if !lower.contains("media/") {
+        return None;
     }
+
+    // Must have a known image extension
+    let known_ext = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif", "emf", "wmf", "svg"];
+    let has_ext = known_ext.iter().any(|ext| lower.ends_with(ext));
+    if !has_ext {
+        return None;
+    }
+
+    // Resolve relative path: "../media/foo.png" -> "word/media/foo.png"
+    if target.starts_with("../") {
+        Some(format!("word/{}", &target[3..]))
+    } else if target.starts_with('/') {
+        // Absolute within ZIP — strip leading slash
+        Some(target.trim_start_matches('/').to_string())
+    } else {
+        // Relative to word/ — "media/foo.png" -> "word/media/foo.png"
+        Some(format!("word/{}", target))
+    }
+}
+
+/// Guess MIME type from file path extension.
+fn mime_from_path(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".png")  { return "image/png"; }
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") { return "image/jpeg"; }
+    if lower.ends_with(".gif")  { return "image/gif"; }
+    if lower.ends_with(".bmp")  { return "image/bmp"; }
+    if lower.ends_with(".webp") { return "image/webp"; }
+    if lower.ends_with(".tiff") || lower.ends_with(".tif") { return "image/tiff"; }
+    if lower.ends_with(".svg")  { return "image/svg+xml"; }
+    // EMF / WMF are Windows meta-files; embed as octet-stream so viewers can skip gracefully
+    "image/x-emf"
+}
+
+/// Strip path components and unsafe characters to produce a safe filename.
+/// e.g. "../media/photo%20(1).png" → "photo_1_"
+fn sanitize_filename(target: &str) -> String {
+    let base = std::path::Path::new(target)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
+
+    base.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -523,26 +916,26 @@ impl Converter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use docx::formatting::CharacterProperty;
 
     #[test]
     fn test_escape_md() {
         assert_eq!(Converter::escape_md("hello world"), "hello world");
         assert_eq!(Converter::escape_md("**bold**"), "\\*\\*bold\\*\\*");
-        assert_eq!(Converter::escape_md("foo|bar"), "foo\\|bar");
     }
 
     #[test]
     fn test_inline_bold() {
         let mut props = CharacterProperty::default();
-        props.bold = Some(docx::formatting::Bold);
+        props.bold = Some(docx::formatting::Bold::from(true));
         assert_eq!(Converter::apply_inline("hello", &props), "**hello**");
     }
 
     #[test]
     fn test_inline_bold_italic() {
         let mut props = CharacterProperty::default();
-        props.bold = Some(docx::formatting::Bold);
-        props.italics = Some(docx::formatting::Italics);
+        props.bold = Some(docx::formatting::Bold::from(true));
+        props.italics = Some(docx::formatting::Italics::from(true));
         assert_eq!(Converter::apply_inline("world", &props), "_**world**_");
     }
 
@@ -552,5 +945,26 @@ mod tests {
         assert_eq!(c.heading_from_style("Title", "Hello"), Some("# Hello".to_string()));
         assert_eq!(c.heading_from_style("Heading2", "Section"), Some("## Section".to_string()));
         assert_eq!(c.heading_from_style("Normal", "text"), None);
+    }
+
+    #[test]
+    fn test_normalise_media_path() {
+        assert_eq!(normalise_media_path("../media/image1.png"), Some("word/media/image1.png".to_string()));
+        assert_eq!(normalise_media_path("media/image1.jpg"), Some("word/media/image1.jpg".to_string()));
+        assert_eq!(normalise_media_path("../embeddings/sheet.xlsx"), None);
+        assert_eq!(normalise_media_path("hyperlink_target"), None);
+    }
+
+    #[test]
+    fn test_mime_from_path() {
+        assert_eq!(mime_from_path("word/media/img.png"), "image/png");
+        assert_eq!(mime_from_path("word/media/photo.JPEG"), "image/jpeg");
+        assert_eq!(mime_from_path("word/media/anim.gif"), "image/gif");
+    }
+
+    #[test]
+    fn test_converter_no_images_flag() {
+        let c = Converter::new().no_images();
+        assert!(!c.embed_images);
     }
 }

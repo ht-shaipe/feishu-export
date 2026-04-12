@@ -64,6 +64,9 @@ enum Commands {
         /// 输出路径（单文件时可选；目录时忽略）
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
+        /// 图片导出目录（相对路径，相对于 MD 输出目录）；未指定时图片以 Base64 内嵌
+        #[arg(long)]
+        output_images: Option<std::path::PathBuf>,
         /// 递归处理子目录
         #[arg(short, long)]
         recursive: bool,
@@ -145,8 +148,8 @@ fn run_logout() -> ExitCode {
     }
 }
 
-fn run_convert(input: std::path::PathBuf, output: Option<std::path::PathBuf>, recursive: bool, dry_run: bool) -> ExitCode {
-    match cmd::ConvertCommand::new().run(&input, output.as_deref(), recursive, dry_run) {
+fn run_convert(input: std::path::PathBuf, output: Option<std::path::PathBuf>, output_images: Option<std::path::PathBuf>, recursive: bool, dry_run: bool) -> ExitCode {
+    match cmd::ConvertCommand::new().run(&input, output.as_deref(), output_images.as_deref(), recursive, dry_run) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => { eprintln!("{} {}", "❌".red(), e); ExitCode::FAILURE }
     }
@@ -263,8 +266,8 @@ async fn main() -> ExitCode {
             })
         }
 
-        Commands::Convert { input, output, recursive, dry_run } => {
-            run_convert(input, output, recursive, dry_run)
+        Commands::Convert { input, output, output_images, recursive, dry_run } => {
+            run_convert(input, output, output_images, recursive, dry_run)
         }
     }
 }
