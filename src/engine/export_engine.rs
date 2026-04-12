@@ -249,13 +249,23 @@ impl ExportEngine {
         temp_dir: &Path,
         relative_path: &str,
     ) -> Result<PathBuf> {
-        // Auto 模式：按节点类型自动选最佳格式
-        let actual_format = if format == ExportFormat::Auto {
+        // Auto 模式 或 不兼容指定格式时：按节点类型自动选最佳格式
+        let actual_format = if format == ExportFormat::Auto
+            || (format == ExportFormat::Docx
+                && (node.obj_type == "sheet" || node.obj_type == "bitable"))
+        {
             let auto = ExportFormat::for_node_type(&node.obj_type);
-            eprintln!(
-                "[AUTO] {} ({}) → {}",
-                node.title, node.obj_type, auto.extension()
-            );
+            if format != ExportFormat::Auto {
+                eprintln!(
+                    "[AUTO] ⚠️ {} ({}) 不支持 docx，自动切换 → {}",
+                    node.title, node.obj_type, auto.extension()
+                );
+            } else {
+                eprintln!(
+                    "[AUTO] {} ({}) → {}",
+                    node.title, node.obj_type, auto.extension()
+                );
+            }
             auto
         } else {
             format
