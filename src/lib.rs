@@ -1,12 +1,8 @@
-//! 飞书文档批量导出 CLI 工具
+//! feishu-export — CLI 入口
 //!
-//! 这是一个用于批量导出飞书知识库文档的命令行工具。
+//! This binary is a thin wrapper around `feishu-core`.
+//! All heavy logic lives in the `feishu-core` crate.
 
-pub mod api;
 pub mod cmd;
-pub mod engine;
-pub mod error;
-pub mod models;
-pub mod storage;
 
-pub use error::{FeishuError, Result};
+pub use cmd::*;

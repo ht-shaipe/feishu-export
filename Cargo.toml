@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/doc-md"]
+members = ["crates/doc-md", "crates/feishu-core"]
 
 [package]
 name = "feishu-export"
@@ -10,11 +10,11 @@ authors = ["Feishu Export Team"]
 description = "飞书知识库文档批量导出 CLI 工具"
 license = "MIT"
 repository = "https://github.com/xxx/feishu-export"
-keywords = ["feishu", "lark", "export", "cli", "tool"]
 rust-version = "1.70"
 
 [dependencies]
-# Local crates
+# 本地 crates
+feishu-core = { path = "crates/feishu-core" }
 doc-md = { path = "crates/doc-md", features = ["async"] }
 
 # CLI 框架
@@ -26,44 +26,25 @@ indicatif = { version = "0.17", features = ["tokio"] }
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
 
-# HTTP 客户端
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-
-# 序列化
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-
-# 配置文件
-toml = "0.8"
-figment = { version = "0.10", features = ["toml"] }
-
 # 工具库
+dirs = "5"
+walkdir = "2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-dirs = "5"
-thiserror = "1"
-anyhow = "1"
-url = "2"
-base64 = "0.22"
 
-# zip 打包
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# 序列化（仅 config 命令用到）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
 
-# 缓存
-glob = "0.3"
-
-# 工具库
-webbrowser = "1"
+# CLI 依赖
 rpassword = "7"
-walkdir = "2"
-sanitize-filename = "0.5"
+webbrowser = "1"
+url = "2"
 
 [dev-dependencies]
 tokio-test = "0.4"
-wiremock = "0.6"
 tempfile = "3"
-serial_test = "3"
 
 [profile.release]
 opt-level = 3

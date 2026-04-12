@@ -3,7 +3,7 @@ pub mod export;
 pub mod login;
 pub mod spaces;
 
-pub use config::*;
-pub use export::*;
-pub use login::*;
-pub use spaces::*;
+pub use config::ConfigCommand;
+pub use export::ExportCommand;
+pub use login::LoginCommand;
+pub use spaces::SpacesCommand;
