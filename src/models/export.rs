@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 
 /// 导出格式
@@ -154,6 +155,127 @@ impl ExportProgress {
             return 0.0;
         }
         (self.completed as f64) / (self.total as f64)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 导出记录（exports.log）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 单条导出记录
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportLogEntry {
+    /// ISO 8601 时间戳
+    pub timestamp: String,
+    /// 文档标题
+    pub title: String,
+    /// 文档 obj_token
+    pub obj_token: String,
+    /// 文档类型 docx / sheet / bitable / ...
+    pub obj_type: String,
+    /// 成功 / 失败 / 跳过
+    pub status: String,
+    /// 成功时：本地相对路径；失败时：空
+    pub local_path: Option<String>,
+    /// 失败时：错误信息；成功时：空
+    pub error: Option<String>,
+}
+
+impl ExportLogEntry {
+    pub fn success(title: String, obj_token: String, obj_type: String, local_path: String) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            title,
+            obj_token,
+            obj_type,
+            status: "success".to_string(),
+            local_path: Some(local_path),
+            error: None,
+        }
+    }
+
+    pub fn failed(title: String, obj_token: String, obj_type: String, error: String) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            title,
+            obj_token,
+            obj_type,
+            status: "failed".to_string(),
+            local_path: None,
+            error: Some(error),
+        }
+    }
+
+    /// 写入一行 JSON Line 到 writer
+    pub fn write_jsonl<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        let line = serde_json::to_string(self).unwrap_or_else(|_| String::from("{}"));
+        writeln!(w, "{}", line)
+    }
+}
+
+/// 导出日志（流式追加写入）
+#[derive(Clone)]
+pub struct ExportLog {
+    path: std::path::PathBuf,
+}
+
+impl ExportLog {
+    pub fn new(output_dir: &std::path::Path, space_id: &str) -> std::io::Result<Self> {
+        let log_path = output_dir.join("exports.log");
+        // 写入文件头注释
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        writeln!(file, "# feishu-export log — space_id={} started={}", space_id, chrono::Utc::now().to_rfc3339())?;
+        drop(file);
+        Ok(Self { path: log_path })
+    }
+
+    /// 追加一条成功记录
+    pub fn append_success(
+        &self,
+        title: &str,
+        obj_token: &str,
+        obj_type: &str,
+        local_path: &std::path::Path,
+    ) -> std::io::Result<()> {
+        let entry = ExportLogEntry::success(
+            title.to_string(),
+            obj_token.to_string(),
+            obj_type.to_string(),
+            local_path.display().to_string(),
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        entry.write_jsonl(&mut file)
+    }
+
+    /// 追加一条失败记录
+    pub fn append_failed(
+        &self,
+        title: &str,
+        obj_token: &str,
+        obj_type: &str,
+        error: &str,
+    ) -> std::io::Result<()> {
+        let entry = ExportLogEntry::failed(
+            title.to_string(),
+            obj_token.to_string(),
+            obj_type.to_string(),
+            error.to_string(),
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        entry.write_jsonl(&mut file)
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::api::FeishuClient;
 use crate::engine::{MdConverter, NodeTreeManager};
 use crate::error::{FeishuError, Result};
-use crate::models::export::{ExportCache, ExportFormat, ExportProgress};
+use crate::models::export::{ExportCache, ExportFormat, ExportLog, ExportProgress};
 use crate::models::wiki::Node;
 use crate::storage::CacheStore;
 use colored::Colorize;
@@ -96,6 +96,13 @@ impl ExportEngine {
         let temp_dir = output_dir.join(format!("temp_{}", space_id));
         fs::create_dir_all(&temp_dir)?;
 
+        // 初始化导出记录
+        let export_log = ExportLog::new(output_dir, space_id)
+            .map_err(|e| FeishuError::ApiError {
+                code: -1,
+                msg: format!("Failed to create export log: {}", e),
+            })?;
+
         // 导出进度
         let progress = Arc::new(std::sync::Mutex::new(ExportProgress::new(nodes.len())));
         let pb = ProgressBar::new(nodes.len() as u64);
@@ -116,13 +123,21 @@ impl ExportEngine {
             let pb_clone = pb.clone();
             let progress_clone = Arc::clone(&progress);
             let temp_dir_clone = temp_dir.clone();
+            let export_log_clone = export_log.clone();
             let obj_token_clone = node.obj_token.clone();
+            let node_title_clone = node.title.clone();
+            let node_type_clone = node.obj_type.clone();
             let path = path_map
                 .get(&node.obj_token)
                 .cloned()
                 .unwrap_or_else(|| format!("{}/{}", node.depth, node.safe_filename()));
             let mut cache_clone = cache.clone();
             let format = format;
+
+            // 提前提取日志需要的字段，避免 node 被重复 move
+            let node_title = node.title.clone();
+            let node_token = node.obj_token.clone();
+            let node_type = node.obj_type.clone();
 
             let handle: JoinHandle<Result<(Node, Option<PathBuf>)>> = tokio::spawn(async move {
                 let _permit = sem_clone.acquire().await.unwrap();
@@ -141,9 +156,13 @@ impl ExportEngine {
                 match result {
                     Ok(local_path) => {
                         pb_clone.inc(1);
-                        pb_clone.set_message(format!("✅ {}", node.title));
+                        pb_clone.set_message(format!("✅ {}", node_title));
                         prog.increment_completed();
                         cache_clone.mark_completed(node.obj_token.clone());
+                        // 写成功记录（同步 I/O，tokio 自动入线程池）
+                        let _ = export_log_clone.append_success(
+                            &node_title, &node_token, &node_type, &local_path,
+                        );
                         Ok((node, Some(local_path)))
                     }
                     Err(e) => {
@@ -155,16 +174,18 @@ impl ExportEngine {
                             count < 3
                         };
                         if is_first_failure {
-                            eprintln!("[ERR] ❌ {}: {}", node.title, err_msg);
-                            eprintln!("[ERR]    obj_token={} obj_type={}", node.obj_token, node.obj_type);
+                            eprintln!("[ERR] ❌ {}: {}", node_title, err_msg);
+                            eprintln!("[ERR]    obj_token={} obj_type={}", node_token, node_type);
                         }
                         if e.is_retryable() {
-                            pb_clone.set_message(format!("⚠️ {} (重试)", node.title));
+                            pb_clone.set_message(format!("⚠️ {} (重试)", node_title));
                         } else {
-                            pb_clone.set_message(format!("❌ {}", node.title));
+                            pb_clone.set_message(format!("❌ {}", node_title));
                         }
                         prog.increment_failed();
                         cache_clone.mark_failed(node.obj_token.clone());
+                        // 写失败记录
+                        let _ = export_log_clone.append_failed(&node_title, &node_token, &node_type, &err_msg);
                         Ok((node, None))
                     }
                 }

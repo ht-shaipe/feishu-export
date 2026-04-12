@@ -159,16 +159,21 @@ impl FeishuClient {
 
         let response = self.download(&url, access_token).await?;
 
-        // 先读 body 再检查状态（response 不能在 .text() 后再访问）
+        // 先保存 status 再读 body（response 在 .text() 后不可再访问）
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await?;
             return Err(FeishuError::ApiError {
                 code: status.as_u16() as i32,
-                msg: format!("Download failed ({}): {}", status, body.chars().take(200).collect::<String>()),
+                msg: format!(
+                    "Download failed ({}): {}",
+                    status,
+                    body.chars().take(300).collect::<String>()
+                ),
             });
         }
 
+        // 状态 OK，保留 Response 给调用方读 bytes（二进制文件流）
         Ok(response)
     }
 
