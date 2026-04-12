@@ -140,6 +140,140 @@ impl SpacesCommand {
         Ok(())
     }
 
+    /// 列出知识库所有文档（平铺）
+    pub async fn list_docs(
+        &self,
+        space_id: &str,
+        filter_type: Option<&str>,
+        csv: bool,
+    ) -> Result<()> {
+        let token = self.get_valid_token().await?;
+
+        println!(
+            "{}",
+            format!("🔵 正在获取空间 {} 的文档列表...", space_id).blue()
+        );
+
+        let nodes = self.client.get_node_tree(&token, space_id).await?;
+
+        // 过滤出非文件夹节点（可导出文档）
+        let docs: Vec<_> = nodes
+            .iter()
+            .filter(|n| !n.is_folder())
+            .filter(|n| {
+                if let Some(ft) = filter_type {
+                    n.obj_type == ft
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        if docs.is_empty() {
+            println!("{}", "⚠️ 没有找到符合条件的文档".yellow());
+            return Ok(());
+        }
+
+        if csv {
+            // CSV 输出：obj_token, title, obj_type, parent_path
+            println!("obj_token,title,obj_type,parent_path");
+            for node in &docs {
+                let parent_path = self
+                    .build_parent_path(&nodes, node)
+                    .map(|p| p.replace('"', "\"\""))
+                    .unwrap_or_default();
+                println!(
+                    "\"{}\",\"{}\",\"{}\",\"{}\"",
+                    node.obj_token,
+                    node.title.replace('"', "\"\""),
+                    node.obj_type,
+                    parent_path
+                );
+            }
+            println!(
+                "{}",
+                format!("共 {} 条记录（CSV 格式）", docs.len()).dimmed()
+            );
+        } else {
+            // 表格输出
+            let total = docs.len();
+            println!(
+                "{}",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    .dimmed()
+            );
+            println!(
+                "{}",
+                format!(
+                    "✅ 找到 {} 个文档:",
+                    total
+                )
+                .green()
+            );
+            println!(
+                "{}",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    .dimmed()
+            );
+            println!(
+                "{:36}  {:10}  {}",
+                "token".dimmed(),
+                "type".dimmed(),
+                "title".dimmed()
+            );
+            println!(
+                "{}",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    .dimmed()
+            );
+            for node in &docs {
+                let type_icon = match node.obj_type.as_str() {
+                    "docx" => "docx".cyan(),
+                    "sheet" => "sheet".yellow(),
+                    "bitable" => "bitable".magenta(),
+                    "doc" => "doc".blue(),
+                    _ => node.obj_type.white(),
+                };
+                println!(
+                    "{}  {:10}  {}",
+                    node.obj_token.dimmed(),
+                    type_icon,
+                    node.title
+                );
+            }
+            println!(
+                "{}",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    .dimmed()
+            );
+            println!("{}", format!("共 {} 个文档", total).dimmed());
+        }
+
+        Ok(())
+    }
+
+    /// 构建节点的父路径
+    fn build_parent_path(&self, all_nodes: &[crate::models::wiki::Node], node: &crate::models::wiki::Node) -> Option<String> {
+        let mut path = Vec::new();
+        let mut current = node.parent_node_token.clone();
+
+        while let Some(parent_token) = current {
+            if let Some(parent) = all_nodes.iter().find(|n| n.node_token == parent_token) {
+                path.push(parent.title.clone());
+                current = parent.parent_node_token.clone();
+            } else {
+                break;
+            }
+        }
+
+        if path.is_empty() {
+            None
+        } else {
+            path.reverse();
+            Some(path.join(" / "))
+        }
+    }
+
     /// 获取有效的访问令牌
     async fn get_valid_token(&self) -> Result<String> {
         let mut token_data = self.token_store.load()?;

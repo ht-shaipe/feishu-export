@@ -82,7 +82,12 @@ impl NodeTreeManager {
                 "📎"
             };
 
-            println!("{}{} {}", indent, icon, node.title);
+            // 显示 obj_token（用于 export-one）
+            if node.obj_type == "docx" || node.obj_type == "sheet" || node.obj_type == "bitable" || node.obj_type == "doc" {
+                println!("{}{} {}  [token={}]", indent, icon, node.title, node.obj_token);
+            } else {
+                println!("{}{} {}", indent, icon, node.title);
+            }
         }
     }
 }

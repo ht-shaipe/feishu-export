@@ -107,40 +107,26 @@ impl FeishuClient {
                 .get_export_task_status(access_token, ticket, obj_token)
                 .await?;
 
-            match status.status.as_str() {
-                "success" => {
-                    if status.file_token.is_empty() {
-                        return Err(FeishuError::ExportTimeout {
-                            token: obj_token.to_string(),
-                        });
-                    }
-                    return Ok(status.file_token);
-                }
-                "failed" => {
-                    return Err(FeishuError::ApiError {
-                        code: -1,
-                        msg: format!(
-                            "Export failed for token {}: {}",
-                            obj_token, status.error_message
-                        ),
+            let is_complete = status.result.extra.is_complete == "true";
+            let file_token = status.result.file_token.clone();
+
+            if is_complete {
+                if file_token.is_empty() {
+                    return Err(FeishuError::ExportTimeout {
+                        token: obj_token.to_string(),
                     });
                 }
-                "pending" | "processing" => {
-                    if attempts >= max_attempts {
-                        return Err(FeishuError::ExportTimeout {
-                            token: obj_token.to_string(),
-                        });
-                    }
-                    // 指数退避：2秒，4秒，...
-                    let delay = 2u64.pow(attempts.min(5)) * 1000;
-                    sleep(Duration::from_millis(delay)).await;
-                }
-                _ => {
-                    return Err(FeishuError::ApiError {
-                        code: -1,
-                        msg: format!("Unknown export status: {}", status.status),
+                eprintln!("[API] Export complete! file_token={}", file_token);
+                return Ok(file_token);
+            } else {
+                if attempts >= max_attempts {
+                    return Err(FeishuError::ExportTimeout {
+                        token: obj_token.to_string(),
                     });
                 }
+                // 指数退避：2秒，4秒，...
+                let delay = 2u64.pow(attempts.min(5)) * 1000;
+                sleep(Duration::from_millis(delay)).await;
             }
         }
     }

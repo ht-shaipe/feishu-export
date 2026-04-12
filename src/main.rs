@@ -108,6 +108,17 @@ enum SpacesAction {
         /// 知识空间 ID
         space_id: String,
     },
+    /// 列出知识库所有文档（平铺列表）
+    ListDocs {
+        /// 知识空间 ID
+        space_id: String,
+        /// 仅显示指定类型的文档 (docx, sheet, bitable, doc, folder)
+        #[arg(long)]
+        filter_type: Option<String>,
+        /// 输出 CSV 格式（方便后续处理）
+        #[arg(long)]
+        csv: bool,
+    },
 }
 
 #[tokio::main]
@@ -142,6 +153,15 @@ async fn main() -> Result<()> {
             SpacesAction::Info { space_id } => {
                 cmd::SpacesCommand::new()?.info(&space_id).await?;
             }
+            SpacesAction::ListDocs {
+                space_id,
+                filter_type,
+                csv,
+            } => {
+                cmd::SpacesCommand::new()?
+                    .list_docs(&space_id, filter_type.as_deref(), csv)
+                    .await?;
+            }
         },
         Commands::Export {
             space_id,
@@ -156,6 +176,16 @@ async fn main() -> Result<()> {
             }
             cmd::ExportCommand::new()?
                 .run(&space_id, &format, output, node, Some(concurrency), resume)
+                .await?;
+        }
+        Commands::ExportOne {
+            obj_token,
+            obj_type,
+            format,
+            output,
+        } => {
+            cmd::ExportCommand::new()?
+                .run_one(&obj_token, &obj_type, &format, output)
                 .await?;
         }
     }

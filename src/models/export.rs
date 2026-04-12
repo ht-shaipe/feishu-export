@@ -307,15 +307,37 @@ pub struct ExportTaskStatusResponse {
     pub data: ExportTaskStatusData,
 }
 
+/// 飞书导出任务状态数据
+/// 实际结构: { code, data: { result: { extra: { is_complete }, file_token, file_extension, ... } } }
 #[derive(Debug, Deserialize)]
 pub struct ExportTaskStatusData {
-    pub status: String,
+    pub result: ExportTaskResult,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportTaskResult {
+    /// 轮询进度信息
+    #[serde(default)]
+    pub extra: ExportTaskExtra,
+    /// 导出文件 token（完成后可用）
     #[serde(default)]
     pub file_token: String,
+    /// 文件扩展名
     #[serde(default)]
-    pub error_code: String,
+    pub file_extension: String,
+    /// 文件名
     #[serde(default)]
-    pub error_message: String,
+    pub file_name: String,
+    /// 文件大小
+    #[serde(default)]
+    pub file_size: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ExportTaskExtra {
+    /// "true" 表示完成
+    #[serde(default)]
+    pub is_complete: String,
 }
 
 /// 导出结果

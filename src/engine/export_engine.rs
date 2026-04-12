@@ -241,7 +241,7 @@ impl ExportEngine {
     }
 
     /// 导出单个文档
-    async fn export_single_document(
+    pub async fn export_single_document(
         client: &FeishuClient,
         token: &str,
         node: &Node,
