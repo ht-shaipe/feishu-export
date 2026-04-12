@@ -1,7 +1,8 @@
 use crate::api::FeishuClient;
-use crate::engine::ExportEngine;
+use crate::engine::{ExportEngine, NodeTreeManager};
 use crate::error::{FeishuError, Result};
 use crate::models::export::ExportFormat;
+use crate::models::wiki::Node;
 use crate::storage::{ConfigStore, TokenStore};
 use colored::Colorize;
 use std::path::PathBuf;

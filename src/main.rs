@@ -61,6 +61,20 @@ enum Commands {
         #[arg(long)]
         resume: bool,
     },
+    /// 先导出单篇（调试用）
+    ExportOne {
+        /// 文档的 obj_token（从 spaces tree 获取）
+        obj_token: String,
+        /// 文档类型：docx / sheet / bitable / doc
+        #[arg(long, default_value = "docx")]
+        obj_type: String,
+        /// 导出格式 (docx, pdf, md, xlsx, csv)
+        #[arg(short, long, default_value = "docx")]
+        format: String,
+        /// 输出目录
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
