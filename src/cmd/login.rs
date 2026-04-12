@@ -24,40 +24,50 @@ impl LoginCommand {
 
     /// 执行 OAuth 登录流程
     pub async fn run(&self, no_browser: bool) -> Result<()> {
-        println!("{}", "🔵 正在启动 OAuth 授权流程...".blue());
+        eprintln!("[LOG] === Login flow started ===");
 
         // 检查配置
         if !self.config_store.config_path().exists() {
+            eprintln!("[LOG] Config file not found: {:?}", self.config_store.config_path());
             return Err(FeishuError::ConfigNotFound);
         }
+        eprintln!("[LOG] Config file exists, loading...");
+        self.config_store.load()?;
+        let loaded = self.config_store.load()?;
+        eprintln!("[LOG] Config loaded: app_id={}", loaded.app_id);
 
         // 生成 state
         let state = OAuthState::new();
         let state_str = state.state.clone();
+        eprintln!("[LOG] Generated state: {}", state_str);
 
         // 构造授权 URL
         let auth_url = self.client.build_auth_url(&self.config_store, &state_str)?;
+        eprintln!("[LOG] Auth URL built: {}", auth_url);
 
         // 启动本地 HTTP 服务器接收回调
         let (tx, rx) = std::sync::mpsc::channel();
-        // 添加 ready 信号（sync_channel 确保服务器就绪后再打开浏览器）
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
         let tx = Arc::new(Mutex::new(tx));
         let tx_clone = Arc::clone(&tx);
 
         let server_state = state_str.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                Self::start_callback_server(server_state, tx_clone, ready_tx).await
-            {
-                eprintln!("服务器错误: {}", e);
+        eprintln!("[LOG] Spawning callback server...");
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = Self::start_callback_server(server_state, tx_clone, ready_tx).await {
+                eprintln!("[SERVER] Server error: {}", e);
             }
         });
 
-        // 等待服务器就绪（关键：确保端口已监听再打开浏览器）
-        let _ = ready_rx
-            .recv()
-            .map_err(|e| FeishuError::HttpServerError(format!("Server ready signal error: {}", e)));
+        eprintln!("[LOG] Waiting for server ready signal...");
+        let ready_result = ready_rx.recv();
+        match ready_result {
+            Ok(()) => eprintln!("[LOG] ✅ Server ready signal received"),
+            Err(e) => {
+                eprintln!("[LOG] ❌ Server ready signal error: {}", e);
+                // 即使 ready 信号失败，也继续尝试（端口可能已监听）
+            }
+        }
 
         // 打开浏览器
         if no_browser {
@@ -65,31 +75,43 @@ impl LoginCommand {
             println!("{}", auth_url.cyan().underline());
         } else {
             println!("{}", "正在打开浏览器...".blue());
-            if let Err(_) = webbrowser::open(&auth_url) {
+            eprintln!("[LOG] Opening browser with webbrowser::open...");
+            if let Err(e) = webbrowser::open(&auth_url) {
+                eprintln!("[LOG] webbrowser::open failed: {}", e);
                 println!("{}", "⚠️ 无法自动打开浏览器，请手动打开上述 URL".yellow());
                 println!("{}", "URL:".yellow());
                 println!("{}", auth_url.cyan().underline());
+            } else {
+                eprintln!("[LOG] webbrowser::open succeeded");
             }
         }
 
         println!("{}", "⏳ 等待授权回调...".blue());
-        println!("（授权完成后此页面会自动关闭）");
+        eprintln!("[LOG] Blocking on rx.recv() for callback...");
 
         // 等待回调
         let callback = rx.recv().map_err(|e| {
+            eprintln!("[LOG] ❌ rx.recv() error: {}", e);
             FeishuError::HttpServerError(format!("Failed to receive callback: {}", e))
         })?;
 
+        eprintln!("[LOG] ✅ Received callback: code={}, state={}", callback.code, callback.state);
+
+        // 取消服务器任务（不再需要）
+        server_handle.abort();
+
         // 用 code 换取 token
-        println!("{}", "🔵 正在获取访问令牌...".blue());
+        eprintln!("[LOG] Exchanging code for token...");
         let token_data = self
             .client
             .exchange_code_for_token(&self.config_store, &callback.code)
             .await?;
 
+        eprintln!("[LOG] Token received, saving...");
         // 保存 token
         self.token_store.save(&token_data)?;
 
+        eprintln!("[LOG] ✅ Login complete");
         println!();
         println!("{}", "✅ 登录成功！".green());
         println!("访问令牌有效期: 约 6.5 小时");
@@ -114,54 +136,69 @@ impl LoginCommand {
         use std::net::SocketAddr;
         use tokio::net::TcpListener;
 
+        eprintln!("[SERVER] Starting callback server...");
+
         let addr: SocketAddr = "127.0.0.1:8765".parse()?;
+        eprintln!("[SERVER] Binding to {}", addr);
+
         let listener = TcpListener::bind(&addr).await?;
-        println!("🔵 回调服务器监听: http://{}", addr);
+        eprintln!("[SERVER] ✅ Bound successfully, listening on http://{}", addr);
 
-        // 通知主线程：服务器已就绪，可以打开浏览器了
-        let _ = ready_tx.send(());
+        // 通知主线程：服务器已就绪
+        eprintln!("[SERVER] Sending ready signal...");
+        let send_result = ready_tx.send(());
+        eprintln!("[SERVER] Ready signal send result: {:?}", send_result);
 
-        // 只接收一个请求
-        loop {
-            let (mut stream, _) = listener.accept().await?;
-            let tx_clone = Arc::clone(&tx);
-            let state_clone = expected_state.clone();
+        eprintln!("[SERVER] Waiting for incoming connection...");
+        let (mut stream, remote_addr) = listener.accept().await?;
+        eprintln!("[SERVER] ✅ Connection from {}", remote_addr);
 
-            tokio::spawn(async move {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let tx_clone = Arc::clone(&tx);
+        let state_clone = expected_state.clone();
 
-                let mut read_buf = [0; 4096];
-                let n = stream.read(&mut read_buf).await.unwrap_or(0);
-                let request = String::from_utf8_lossy(&read_buf[..n]);
+        // 处理请求
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut read_buf = [0; 8192];
+        let n = stream.read(&mut read_buf).await.unwrap_or(0);
+        let request = String::from_utf8_lossy(&read_buf[..n]).to_string();
 
-                // 解析回调参数
-                if let Some(query_start) = request.find("GET /callback?") {
-                    let query_part = &request[query_start + 15..];
-                    if let Some(query_end) = query_part.find(' ') {
-                        let query = &query_part[..query_end];
-                        let params = url::form_urlencoded::parse(query.as_bytes());
+        eprintln!("[SERVER] Request:\n{}", request.lines().take(5).collect::<Vec<_>>().join("\n"));
 
-                        let mut code = None;
-                        let mut state = None;
+        // 解析回调参数
+        if let Some(query_start) = request.find("/callback?") {
+            let after_callback = &request[query_start + 10..];
+            eprintln!("[SERVER] Path after /callback?: {}", after_callback.split_whitespace().next().unwrap_or(""));
+            if let Some(query_end) = after_callback.find(' ') {
+                let query = &after_callback[..query_end];
+                eprintln!("[SERVER] Query string: {}", query);
 
-                        for (key, value) in params {
-                            if key == "code" {
-                                code = Some(value.to_string());
-                            } else if key == "state" {
-                                state = Some(value.to_string());
-                            }
-                        }
+                let params = url::form_urlencoded::parse(query.as_bytes());
+                let mut code = None;
+                let mut state = None;
 
-                        if let (Some(c), Some(s)) = (code, state) {
-                            // 验证 state
-                            if s != state_clone {
-                                let response = "HTTP/1.1 400 Bad Request\r\n\r\nState mismatch";
-                                let _ = stream.write_all(response.as_bytes()).await;
-                                return;
-                            }
+                for (key, value) in params {
+                    if key == "code" {
+                        code = Some(value.to_string());
+                    } else if key == "state" {
+                        state = Some(value.to_string());
+                    }
+                }
 
-                            // 发送成功响应
-                            let html = r#"<!DOCTYPE html>
+                eprintln!("[SERVER] Parsed: code={:?}, state={:?}", code, state);
+
+                if let (Some(c), Some(s)) = (code, state) {
+                    // 验证 state
+                    if s != state_clone {
+                        eprintln!("[SERVER] ❌ State mismatch: expected={}, got={}", state_clone, s);
+                        let response = "HTTP/1.1 400 Bad Request\r\n\r\nState mismatch";
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return Ok(());
+                    }
+
+                    eprintln!("[SERVER] ✅ State validated");
+
+                    // 发送成功响应
+                    let html = r#"<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>授权成功</title></head>
 <body style="font-family:sans-serif;text-align:center;padding-top:80px;background:#f8f8f8">
@@ -170,24 +207,25 @@ impl LoginCommand {
 </body>
 </html>"#;
 
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
-                                html.len(),
-                                html
-                            );
-                            let _ = stream.write_all(response.as_bytes()).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                        html.len(),
+                        html
+                    );
+                    eprintln!("[SERVER] Sending 200 response...");
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    eprintln!("[SERVER] ✅ Response sent");
 
-                            // 发送回调数据
-                            let _ = tx_clone
-                                .lock()
-                                .await
-                                .send(OAuthCallback { code: c, state: s });
-                        }
-                    }
+                    // 发送回调数据到主线程
+                    eprintln!("[SERVER] Sending callback to main thread...");
+                    let send_result = tx_clone.lock().await.send(OAuthCallback { code: c.clone(), state: s });
+                    eprintln!("[SERVER] Send result: {:?}", send_result);
+                } else {
+                    eprintln!("[SERVER] ❌ Missing code or state in callback");
                 }
-            });
-
-            break;
+            }
+        } else {
+            eprintln!("[SERVER] ❌ Path doesn't contain /callback?: {}", request.lines().next().unwrap_or(""));
         }
 
         Ok(())
