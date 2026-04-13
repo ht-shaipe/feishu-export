@@ -23,6 +23,7 @@ Cargo.lock
 
 # dirs
 output/
+memory/
 
 # Coverage
 coverage/

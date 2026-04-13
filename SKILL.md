@@ -54,10 +54,23 @@ last_updated: 2026-04-12
 
 ```rust
 // 所有核心操作通过 FeishuClient 暴露
+// 所有核心操作通过 FeishuClient 暴露（flat 结构，非嵌套子模块）
 pub struct FeishuClient {
-    pub auth: AuthManager,
-    pub wiki: WikiApi,
-    pub export: ExportApi,
+    // auth
+    pub async fn exchange_code_for_token(&self, config, code) -> Result<TokenData>
+    pub async fn refresh_user_token(&self, config, refresh_token) -> Result<TokenData>
+    pub async fn build_auth_url(&self, config, state) -> Result<String>
+    // wiki
+    pub async fn list_spaces(&self, token) -> Result<Vec<Space>>
+    pub async fn list_nodes(&self, token, space_id, parent_token) -> Result<Vec<Node>>
+    pub async fn get_node_tree(&self, token, space_id) -> Result<Vec<Node>>   // DFS 递归
+    pub async fn get_node_info(&self, token, space_id, node_token) -> Result<NodeInfo>
+    pub async fn get_baike_node(&self, token, obj_type, obj_token) -> Result<NodeInfo>
+    // export
+    pub async fn export_document(&self, token, obj_token, obj_type, format) -> Result<Response>
+    // sheet & bitable (新增)
+    pub async fn get_sheet_first_sheet_id(&self, token, spreadsheet_token) -> Result<String>
+    pub async fn get_bitable_first_table_id(&self, token, app_token) -> Result<String>
 }
 
 // 统一错误类型
@@ -104,9 +117,11 @@ pub trait Storage {
 ```
 feishu-export/
 ├── Cargo.toml                 # workspace 根配置
-├── src/                       # CLI 入口
+├── src/                       # CLI 入口（feishu-cli）
 │   ├── main.rs               # clap 命令定义
+│   ├── lib.rs                # 库入口
 │   └── cmd/                  # 命令处理器
+│       ├── mod.rs
 │       ├── config.rs         # 配置管理
 │       ├── login.rs          # OAuth 登录
 │       ├── spaces.rs         # 知识空间操作
@@ -115,26 +130,38 @@ feishu-export/
 └── crates/
     ├── feishu-core/          # 核心 API 客户端
     │   └── src/
-    │       ├── api.rs        # 飞书 API 封装
+    │       ├── lib.rs        # 模块入口
+    │       ├── api.rs        # 飞书 API 封装（含 sheet/bitable）
     │       ├── models/       # 数据模型
+    │       │   ├── mod.rs
+    │       │   ├── auth.rs   # TokenData 等
+    │       │   ├── export.rs # ExportFormat、ExportTask 等
+    │       │   └── wiki.rs   # Node、Space 等
     │       ├── storage/      # 本地存储
+    │       │   ├── mod.rs
+    │       │   └── config_store.rs
     │       ├── engine/       # 导出引擎
-    │       └── error.rs      # 错误定义
+    │       │   ├── mod.rs
+    │       │   └── export_engine.rs
+    │       └── error.rs      # FeishuCoreError 统一错误
     └── doc-converter/        # docx → md 转换
         └── src/
-            └── lib.rs        # 纯 Rust docx 解析
+            └── lib.rs        # 纯 Rust docx 解析（用 PoiScript/docx）
 ```
 
 ### 核心模块说明
 
-| 模块                   | 职责                                        | 智能体角色 |
-| ---------------------- | ------------------------------------------- | ---------- |
-| `feishu-core::api`     | 飞书 Open API 封装（OAuth、Wiki、导出任务） | API 智能体 |
-| `feishu-core::models`  | WikiNode、ExportTask、TokenData 等模型      | 模型智能体 |
-| `feishu-core::storage` | 配置文件、Token 存储管理                    | 存储智能体 |
-| `feishu-core::engine`  | 导出任务调度、并发控制、进度跟踪            | 引擎智能体 |
-| `doc-converter`        | 使用 docx crate 纯 Rust 实现 docx → md 转换 | 转换智能体 |
-| `src/cmd/*`            | CLI 命令解析和用户交互                      | CLI 智能体 |
+| 模块                        | 职责                                        | 智能体角色 |
+| -------------------------- | ------------------------------------------- | ---------- |
+| `feishu-core::api`          | 飞书 Open API 封装（OAuth、Wiki、导出任务） | API 智能体 |
+| `feishu-core::models`       | Node、Space、ExportFormat 等模型             | 模型智能体 |
+| `feishu-core::models::auth`| TokenData 等认证相关模型                    | 模型智能体 |
+| `feishu-core::models::wiki`| Node、Space 等 Wiki 相关模型                 | 模型智能体 |
+| `feishu-core::models::export` | ExportFormat、ExportTask 等导出相关模型    | 模型智能体 |
+| `feishu-core::storage`      | 配置文件、Token 存储管理                    | 存储智能体 |
+| `feishu-core::engine`       | 导出任务调度、并发控制、进度跟踪            | 引擎智能体 |
+| `doc-converter`             | 使用纯 Rust docx crate 实现 docx → md 转换 | 转换智能体 |
+| `feishu-cli` (src/cmd/*)    | CLI 命令解析和用户交互                      | CLI 智能体 |
 
 ---
 

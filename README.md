@@ -142,14 +142,20 @@ feishu-export spaces tree <YOUR_SPACE_ID>
 ### 5. 导出文档
 
 ```bash
-# 导出整个知识空间（默认 docx 格式）
+# 导出整个知识空间（默认导出为 xlsx，支持 sheet/bitable）
 feishu-export export <YOUR_SPACE_ID>
 
-# 导出为 Markdown
+# 导出为 Markdown（仅 docx/doc 支持）
 feishu-export export <YOUR_SPACE_ID> --format md
 
-# 导出为 PDF
+# 导出为 PDF（仅 docx/doc 支持）
 feishu-export export <YOUR_SPACE_ID> --format pdf
+
+# 导出为 CSV（仅 sheet/bitable 支持）
+feishu-export export <YOUR_SPACE_ID> --format csv
+
+# 导出为 XLSX（电子表格/多维表格推荐格式）
+feishu-export export <YOUR_SPACE_ID> --format xlsx
 
 # 指定输出目录
 feishu-export export <YOUR_SPACE_ID> --output ~/Downloads/feishu-exports
@@ -218,20 +224,22 @@ feishu-export convert document.docx --dry-run
 | 飞书类型 | 导出格式 | 说明 |
 |----------|----------|------|
 | 新版文档 (docx) | docx / pdf / md | 完整支持 |
-| 旧版文档 (doc) | docx / pdf / md | 完整支持 |
-| 电子表格 (sheet) | xlsx / csv | 自动格式转换 |
-| 多维表格 (bitable) | xlsx / csv | 自动格式转换 |
+| 旧版文档 (doc) | docx / pdf | 完整支持 |
+| 电子表格 (sheet) | xlsx / csv | **仅支持 xlsx/csv**，自动格式转换 |
+| 多维表格 (bitable) | xlsx / csv | **仅支持 xlsx/csv**，自动格式转换 |
 | 文件 (file) | 原样下载 | .xlsx/.docx 等直接下载 |
 | 思维导图 (mindnote) | - | 暂不支持 API 导出 |
 | 幻灯片 (slides) | - | 暂不支持 API 导出 |
 
+> ⚠️ **注意**：电子表格和多维表格**不支持**导出为 docx / pdf / md，飞书 API 仅支持 xlsx 和 csv 两种格式。工具会自动按 xlsx 导出（`--format xlsx` 为默认值），如需 CSV 请使用 `--format csv`。
+
 ### 格式自动降级
 
-当请求的格式不支持时，工具会自动降级：
+当请求的格式不被支持时，工具会自动降级：
 
 | 请求格式 | 实际格式 | 说明 |
 |----------|----------|------|
-| docx | xlsx | 电子表格/多维表格 |
+| docx / pdf / md | xlsx | 电子表格/多维表格 |
 | docx | pdf | 格式不兼容的文档 |
 | md | pdf | 无法转换为 Markdown |
 
@@ -243,7 +251,7 @@ feishu-export convert document.docx --dry-run
 
 | 错误码 | 说明 | 解决方案 |
 |--------|------|----------|
-| `1069918` | 文件扩展名不匹配 | 自动降级到兼容格式 |
+| `1069918` | 文件扩展名与类型不匹配 | 自动降级到兼容格式 |
 | `99992402` | API 参数验证失败 | 检查 App 权限配置 |
 | `131006` | 权限不足 | 添加应用为知识库管理员 |
 | `230001` | 文档不存在或已删除 | 跳过该文档 |
