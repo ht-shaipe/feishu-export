@@ -101,12 +101,43 @@ pub struct NodeInfoResponse {
     pub data: NodeInfo,
 }
 
+/// 节点（支持 space_id 在根节点时由调用方填充）
 #[derive(Debug, Deserialize)]
 pub struct NodeInfo {
+    #[serde(default)]
+    pub space_id: Option<String>,
     pub node_token: String,
     pub obj_token: String,
     pub obj_type: String,
     pub title: String,
     #[serde(default)]
-    pub link: String,
+    pub parent_node_token: Option<String>,
+    #[serde(default)]
+    pub link: Option<String>,
+}
+
+/// 知识空间详情
+#[derive(Debug, Clone, Deserialize)]
+pub struct WikiSpaceDetail {
+    #[serde(default)]
+    pub space_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub space_type: Option<String>,
+    #[serde(default)]
+    pub visibility: Option<String>,
+}
+
+/// 知识空间成员
+#[derive(Debug, Clone, Deserialize)]
+pub struct WikiSpaceMember {
+    #[serde(default)]
+    pub member_type: Option<String>,
+    #[serde(default)]
+    pub member_id: Option<String>,
+    #[serde(default)]
+    pub member_role: Option<String>,
 }

@@ -1,50 +1,45 @@
-# doc-md
+# doc-converter
 
-Pure Rust docx → Markdown converter powered by [pandoc](https://pandoc.org).
+纯 Rust docx → Markdown 转换器，无外部依赖。
 
-## Why
+## 实现方式
 
-Most Rust docx-to-markdown solutions are either incomplete or require building a full DOM parser from scratch.
-This crate delegates the heavy lifting to pandoc, keeping the implementation small and correct.
+使用纯 Rust 生态库解析 `.docx` 文件结构：
+- `zip` — 解压 OOXML 包
+- `docx` — 解析 Word 文档 XML 结构（段落、表格、图片等）
+- `regex` — 提取纯文本回退（应对非标准 XML）
+- `base64` — 图片 Base64 编码嵌入 Markdown
 
-## Features
+## 功能特性
 
-- **Sync** and **async** (`tokio`) conversion
-- Configurable markdown flavor: standard, GFM, CommonMark, MultiMarkdown
-- Convert to file or to `String`
-- Proper error types (`thiserror`)
+- 纯 Rust，无须安装 pandoc 等外部工具
+- 支持离线转换（无需网络）
+- 图片自动提取并转为 Base64 data URI 内嵌 Markdown
+- 优雅降级：XML 解析失败时回退到纯文本提取
 
-## Quick Start
+## 支持的转换元素
 
-```toml
-# Cargo.toml
-[dependencies]
-doc-md = { version = "0.1", features = ["async"] }
-```
+| 元素 | 支持状态 |
+|------|---------|
+| 段落文本 | ✅ |
+| 标题（H1-H6） | ✅ |
+| 粗体、斜体、下划线 | ✅ |
+| 有序/无序列表 | ✅ |
+| 表格 | ✅ |
+| 代码块 | ✅ |
+| 内联图片 | ✅ Base64 嵌入 |
+| 引用块 | ✅ |
+| 脚注、尾注 | ⚠️ 部分支持 |
+
+## 快速开始
 
 ```rust
-use doc_md::{Converter, Config, MarkdownFlavor};
+use doc_converter::Converter;
 
-// Sync
 let conv = Converter::new();
 conv.convert("input.docx", "output.md")?;
-
-// Async (feature = "async")
-let conv = doc_md::AsyncConverter::new();
-conv.convert("input.docx", "output.md").await?;
 ```
 
-## Feature Flags
+## 依赖说明
 
-| Flag | Description |
-|------|-------------|
-| `async` | Enable async conversion via tokio |
-
-## Requirements
-
-- [pandoc](https://pandoc.org/installing.html) must be installed and in `PATH`.
-- Use `Converter::check_pandoc()` to verify availability at runtime.
-
-## License
-
-MIT
+本 crate 是 feishu-export 项目的一部分，不作为独立 crate 分发。

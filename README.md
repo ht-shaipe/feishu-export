@@ -4,16 +4,16 @@
 
 ## 功能特性
 
-| 功能 | 说明 |
-|------|------|
-| 🔐 **OAuth 授权** | 浏览器扫码登录，自动管理 Token |
-| 📂 **文档树浏览** | 列出知识空间、查看完整目录结构 |
-| 📦 **批量导出** | 支持 docx / pdf / md / xlsx / csv 格式 |
-| 🗂 **保留结构** | 按原始目录结构打包为 zip 文件 |
-| ⚡ **并发下载** | 可调节并发数（默认 5），支持限流控制 |
-| 🔄 **断点续导** | 中断后可继续，已下载文件自动跳过 |
-| 📝 **格式转换** | docx 本地转换为 Markdown（无需登录） |
-| 🎯 **智能降级** | 格式不支持时自动降级（如 sheet 转 xlsx） |
+| 功能             | 说明                                     |
+| ---------------- | ---------------------------------------- |
+| 🔐 **OAuth 授权** | 浏览器扫码登录，自动管理 Token           |
+| 📂 **文档树浏览** | 列出知识空间、查看完整目录结构           |
+| 📦 **批量导出**   | 支持 docx / pdf / md / xlsx / csv 格式   |
+| 🗂 **保留结构**   | 按原始目录结构打包为 zip 文件            |
+| ⚡ **并发下载**   | 可调节并发数（默认 5），支持限流控制     |
+| 🔄 **断点续导**   | 中断后可继续，已下载文件自动跳过         |
+| 📝 **格式转换**   | docx 本地转换为 Markdown（无需登录）     |
+| 🎯 **智能降级**   | 格式不支持时自动降级（如 sheet 转 xlsx） |
 
 ---
 
@@ -29,16 +29,16 @@
 
 在应用详情页 → **权限管理** → 开通以下权限：
 
-| 权限名称 | 权限标识 | 用途 |
-|----------|----------|------|
-| 获取知识库空间列表 | `wiki:space:readonly` | 列出知识空间 |
-| 获取知识库节点 | `wiki:node:readonly` | 浏览文档树 |
-| 获取文档内容 | `wiki:node:retrieve` | 获取文档详情 |
-| 获取空间信息 | `wiki:wiki:readonly` | 获取空间详情 |
-| 获取文件元信息 | `drive:drive:readonly` | 获取文件信息 |
-| 导出文件 | `drive:export:export:readonly` | 批量导出文档 |
-| 获取文档内容（新版） | `docx:document:readonly` | 读取文档内容 |
-| 识别用户身份 | `contact:user.base:readonly` | 获取用户信息 |
+| 权限名称             | 权限标识                       | 用途         |
+| -------------------- | ------------------------------ | ------------ |
+| 获取知识库空间列表   | `wiki:space:readonly`          | 列出知识空间 |
+| 获取知识库节点       | `wiki:node:readonly`           | 浏览文档树   |
+| 获取文档内容         | `wiki:node:retrieve`           | 获取文档详情 |
+| 获取空间信息         | `wiki:wiki:readonly`           | 获取空间详情 |
+| 获取文件元信息       | `drive:drive:readonly`         | 获取文件信息 |
+| 导出文件             | `drive:export:export:readonly` | 批量导出文档 |
+| 获取文档内容（新版） | `docx:document:readonly`       | 读取文档内容 |
+| 识别用户身份         | `contact:user.base:readonly`   | 获取用户信息 |
 
 > ⚠️ **重要**：应用权限开通后需要「发布」才能生效，请参考飞书文档进行版本发布。
 
@@ -58,7 +58,7 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/xxx/feishu-export.git
+git clone https://github.com/ht-shaipe/feishu-export.git
 cd feishu-export
 
 # 编译（需要 Rust 环境）
@@ -69,7 +69,7 @@ cargo build --release
 
 ### 下载预编译版本
 
-前往 [Releases](https://github.com/xxx/feishu-export/releases) 下载对应平台的二进制文件。
+前往 [Releases](https://github.com/ht-shaipe/feishu-export/releases) 下载对应平台的二进制文件。
 
 ---
 
@@ -221,15 +221,15 @@ feishu-export convert document.docx --dry-run
 
 ## 支持的文档类型
 
-| 飞书类型 | 导出格式 | 说明 |
-|----------|----------|------|
-| 新版文档 (docx) | docx / pdf / md | 完整支持 |
-| 旧版文档 (doc) | docx / pdf | 完整支持 |
-| 电子表格 (sheet) | xlsx / csv | **仅支持 xlsx/csv**，自动格式转换 |
-| 多维表格 (bitable) | xlsx / csv | **仅支持 xlsx/csv**，自动格式转换 |
-| 文件 (file) | 原样下载 | .xlsx/.docx 等直接下载 |
-| 思维导图 (mindnote) | - | 暂不支持 API 导出 |
-| 幻灯片 (slides) | - | 暂不支持 API 导出 |
+| 飞书类型            | 导出格式        | 说明                              |
+| ------------------- | --------------- | --------------------------------- |
+| 新版文档 (docx)     | docx / pdf / md | 完整支持                          |
+| 旧版文档 (doc)      | docx / pdf      | 完整支持                          |
+| 电子表格 (sheet)    | xlsx / csv      | **仅支持 xlsx/csv**，自动格式转换 |
+| 多维表格 (bitable)  | xlsx / csv      | **仅支持 xlsx/csv**，自动格式转换 |
+| 文件 (file)         | 原样下载        | .xlsx/.docx 等直接下载            |
+| 思维导图 (mindnote) | -               | 暂不支持 API 导出                 |
+| 幻灯片 (slides)     | -               | 暂不支持 API 导出                 |
 
 > ⚠️ **注意**：电子表格和多维表格**不支持**导出为 docx / pdf / md，飞书 API 仅支持 xlsx 和 csv 两种格式。工具会自动按 xlsx 导出（`--format xlsx` 为默认值），如需 CSV 请使用 `--format csv`。
 
@@ -237,11 +237,11 @@ feishu-export convert document.docx --dry-run
 
 当请求的格式不被支持时，工具会自动降级：
 
-| 请求格式 | 实际格式 | 说明 |
-|----------|----------|------|
-| docx / pdf / md | xlsx | 电子表格/多维表格 |
-| docx | pdf | 格式不兼容的文档 |
-| md | pdf | 无法转换为 Markdown |
+| 请求格式        | 实际格式 | 说明                |
+| --------------- | -------- | ------------------- |
+| docx / pdf / md | xlsx     | 电子表格/多维表格   |
+| docx            | pdf      | 格式不兼容的文档    |
+| md              | pdf      | 无法转换为 Markdown |
 
 ---
 
@@ -249,13 +249,13 @@ feishu-export convert document.docx --dry-run
 
 ### 常见错误码
 
-| 错误码 | 说明 | 解决方案 |
-|--------|------|----------|
-| `1069918` | 文件扩展名与类型不匹配 | 自动降级到兼容格式 |
-| `99992402` | API 参数验证失败 | 检查 App 权限配置 |
-| `131006` | 权限不足 | 添加应用为知识库管理员 |
-| `230001` | 文档不存在或已删除 | 跳过该文档 |
-| `99991663` | Token 过期 | 运行 `feishu-export login` 重新授权 |
+| 错误码     | 说明                   | 解决方案                            |
+| ---------- | ---------------------- | ----------------------------------- |
+| `1069918`  | 文件扩展名与类型不匹配 | 自动降级到兼容格式                  |
+| `99992402` | API 参数验证失败       | 检查 App 权限配置                   |
+| `131006`   | 权限不足               | 添加应用为知识库管理员              |
+| `230001`   | 文档不存在或已删除     | 跳过该文档                          |
+| `99991663` | Token 过期             | 运行 `feishu-export login` 重新授权 |
 
 ### 网络错误
 
@@ -276,19 +276,19 @@ Network error: error decoding response body
 
 ### 配置文件位置
 
-| 平台 | 路径 |
-|------|------|
-| macOS | `~/Library/Application Support/feishu-export/` |
-| Linux | `~/.config/feishu-export/` |
-| Windows | `%APPDATA%\feishu-export\` |
+| 平台    | 路径                                           |
+| ------- | ---------------------------------------------- |
+| macOS   | `~/Library/Application Support/feishu-export/` |
+| Linux   | `~/.config/feishu-export/`                     |
+| Windows | `%APPDATA%\feishu-export\`                     |
 
 ### 存储文件
 
-| 文件 | 内容 |
-|------|------|
-| `config.toml` | App ID / App Secret |
-| `token.json` | OAuth Token（自动刷新） |
-| `progress/` | 导出进度（断点续导用） |
+| 文件          | 内容                    |
+| ------------- | ----------------------- |
+| `config.toml` | App ID / App Secret     |
+| `token.json`  | OAuth Token（自动刷新） |
+| `progress/`   | 导出进度（断点续导用）  |
 
 ### 管理命令
 

@@ -1,53 +1,53 @@
 [workspace]
-resolver = "2"
 members = ["crates/doc-converter", "crates/feishu-core"]
+resolver = "2"
 
 [package]
-name = "feishu-export"
-version = "0.1.0"
-edition = "2021"
 authors = ["Feishu Export Team"]
 description = "飞书知识库文档批量导出 CLI 工具"
+edition = "2021"
 license = "MIT"
-repository = "https://github.com/xxx/feishu-export"
+name = "feishu-export"
+repository = "https://github.com/ht-shaipe/feishu-export"
 rust-version = "1.70"
+version = "0.1.0"
 
 [dependencies]
 # 本地 crates
-feishu-core = { path = "crates/feishu-core" }
-doc-converter = { path = "crates/doc-converter" }
+doc-converter = {path = "crates/doc-converter"}
+feishu-core = {path = "crates/feishu-core"}
 
 # CLI 框架
-clap = { version = "4.4", features = ["derive", "env"] }
-console = "0.15"
+clap = {version = "4.4", features = ["derive", "env"]}
 colored = "2.1"
-indicatif = { version = "0.17", features = ["tokio"] }
+console = "0.15"
+indicatif = {version = "0.17", features = ["tokio"]}
 
 # 异步运行时
-tokio = { version = "1", features = ["full"] }
+tokio = {version = "1", features = ["full"]}
 
 # 工具库
+chrono = {version = "0.4", features = ["serde"]}
 dirs = "5"
+uuid = {version = "1", features = ["v4"]}
 walkdir = "2"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
 
 # 序列化（仅 config 命令用到）
-serde = { version = "1", features = ["derive"] }
+serde = {version = "1", features = ["derive"]}
 serde_json = "1"
 toml = "0.8"
 
 # CLI 依赖
 rpassword = "7"
-webbrowser = "1"
 url = "2"
+webbrowser = "1"
 
 [dev-dependencies]
-tokio-test = "0.4"
 tempfile = "3"
+tokio-test = "0.4"
 
 [profile.release]
-opt-level = 3
-lto = true
 codegen-units = 1
+lto = true
+opt-level = 3
 strip = true
